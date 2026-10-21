@@ -110,7 +110,10 @@ void pollPads() {
     // SA2_RUN (test runs): from 400 frames after the SA2_DUMP_REL module (a stage) linked, the stick
     // is held forward, so the player travels through the stage.
     static const bool s_run = std::getenv("SA2_RUN") != nullptr;
-    static const int s_runRel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) : -1;
+    // (SA2_RUN_REL=<module id> starts it from another module's link than the dumps'.)
+    static const int s_runRel = std::getenv("SA2_RUN_REL")    ? std::atoi(std::getenv("SA2_RUN_REL"))
+                                : std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL"))
+                                                              : -1;
     if (s_run && s_runRel >= 0 && g_relLinked[s_runRel & 255] && s_frameNo > g_relLinkFrame[s_runRel & 255].load() + 400)
         st[0].stickY = 100;
     std::lock_guard g(s_padLock);

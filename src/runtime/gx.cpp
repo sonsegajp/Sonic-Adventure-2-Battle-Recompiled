@@ -524,9 +524,11 @@ void translateBp(u32 v) {
             aurora(AUR_COPY_DEST);
             put64(hostAddr((s_copyDest & 0x1FFFFF) << 5));
             s_copyDests.insert((s_copyDest & 0x1FFFFF) << 5);
-            // A small copy ends a render-to-texture pass: its segment keeps plain mapping.
+            // A copy of less than the screen ends a render-to-texture pass (shadow textures:
+            // 128 and 256 square in stages, 480 square in Chao World); its segment keeps plain
+            // mapping. Copies of the whole screen (640 wide) capture the scene for screen effects.
             const u32 w = (s_copySrcWH & 0x3FF) + 1, h = ((s_copySrcWH >> 10) & 0x3FF) + 1;
-            if ((w < 400 || h < 300) && s_segmentAt < s_out.size()) s_out[s_segmentAt] = 0;
+            if ((w < 576 || h < 360) && s_segmentAt < s_out.size()) s_out[s_segmentAt] = 0;
         }
         put8(CMD_LOAD_BP);
         put32(v);

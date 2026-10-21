@@ -57,6 +57,8 @@ while i < len(d):
         elif sub == 0x35: print('      AURORA COPY_SRC', struct.unpack_from('>4I', d, i)); i += 16
         elif sub == 0x36: print('      AURORA COPY_DST', struct.unpack_from('>3IB', d, i)); i += 13
         elif sub == 0x37: print('      AURORA COPY_DEST %X' % struct.unpack_from('>Q', d, i)); i += 8
+        elif sub == 0x60: print('      AURORA WIDE_SEGMENT %d' % d[i]); i += 1
+        elif sub == 0x61: print('      AURORA WIDE_2D %d' % d[i]); i += 1
         else: print('      AURORA %04X ?' % sub); break
     elif 0x80 <= op < 0xC0:
         n = struct.unpack_from('>H', d, i + 1)[0]; vs = vsize(op & 7); draws += 1
