@@ -1,6 +1,7 @@
 // Indirect calls: guest code address -> native function, in O(1). Two-level table over the
 // physical address (cached/uncached mirrors resolve alike); pages are allocated on demand.
 #include "runtime/modules.h"
+#include "runtime/gx.h"
 #include "runtime/runtime.h"
 
 #include <atomic>
@@ -44,6 +45,8 @@ static const RelModuleCode* relCode(u32 id) {
     return nullptr;
 }
 
+std::atomic<u64> g_relLinkFrame[256];  // game frame at which each module was last linked (+1; 0 = never)
+
 void registerRelModule(u32 id) {
     const RelModuleCode* m = relCode(id);
     if (!m) fatal("OSLink: no recompiled code for REL module %u", id);
@@ -52,6 +55,7 @@ void registerRelModule(u32 id) {
         dispatchRegister(g_relBase[id][a >> 24] + (a & 0xFFFFFF), m->funcs[i].fn);
     }
     log("[rel] linked module %u (%s): %u functions, text at %08X\n", id, m->file, m->count, g_relBase[id][1]);
+    g_relLinkFrame[id & 255] = gxFrames() + 1;
 }
 
 void unregisterRelModule(u32 id) {

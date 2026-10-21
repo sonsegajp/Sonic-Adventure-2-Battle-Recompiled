@@ -17,8 +17,10 @@
 
 #include <algorithm>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <vector>
 
 namespace rt {
@@ -99,10 +101,46 @@ u32 vertexSize(u32 fmt) {
 
 u32 s_arraysSet = 0;  // CP arrays whose base has been loaded (bit = array index)
 
+// Debugging: SA2_SKIP_DRAWS=i,j,... drops those draws (counted from 0 in every frame).
+u32 s_drawIndex = 0;
+const std::set<u32> s_skipDraws = [] {
+    std::set<u32> s;
+    for (const char* p = std::getenv("SA2_SKIP_DRAWS"); p && *p;) {
+        char* end;
+        s.insert(u32(std::strtoul(p, &end, 10)));
+        p = *end == ',' ? end + 1 : end;
+        if (end == p && *p) break;
+    }
+    return s;
+}();
+
+// ---- snapshots ----
+// Aurora reads array data when the render thread processes the frame, after the game has moved on
+// (and, since draw-done is signalled at once, possibly rewritten its per-frame vertex and matrix
+// buffers). So the arrays a draw uses are copied when the draw is issued, into memory that lives
+// until the frame has been rendered.
+struct Arena {
+    std::vector<std::unique_ptr<u8[]>> chunks;
+    size_t used = 0, cap = 0;
+    u8* alloc(size_t n) {
+        n = (n + 31) & ~size_t(31);
+        if (used + n > cap) {
+            cap = std::max<size_t>(n, size_t(1) << 20);
+            chunks.emplace_back(new u8[cap]);
+            used = 0;
+        }
+        u8* p = chunks.back().get() + used;
+        used += n;
+        return p;
+    }
+};
+Arena s_arena;  // snapshots of the frame being built
+
 // ---- vertex/matrix arrays ----
 // The hardware has no array sizes, but Aurora copies each array a draw reads into a per-frame
-// storage buffer (8 MiB), so a base is sent only once a draw uses it, with the extent the draws
-// have reached so far; it is resent larger (doubling) when a later draw indexes further.
+// storage buffer, so a base is sent only once a draw uses it, as a snapshot of the extent the draws
+// have reached so far; it is resent larger (doubling) when a later draw indexes further. Every new
+// base and every frame starts over (s_arraySent = 0).
 u32 s_arrayBase[16], s_arrayStride[16], s_arraySent[16];
 
 void needArray(u32 i, u32 bytes) {
@@ -110,8 +148,10 @@ void needArray(u32 i, u32 bytes) {
     const u32 limit = kHostMemSize - (s_arrayBase[i] & 0x01FFFFFF);
     const u32 size = std::min((std::max(bytes, s_arraySent[i] * 2) + 63) & ~63u, limit);
     s_arraySent[i] = size;
+    u8* copy = s_arena.alloc(size);
+    std::memcpy(copy, hostp(0x80000000u | (s_arrayBase[i] & 0x01FFFFFF)), size);
     aurora(u16(AUR_ARRAYBASE | i));
-    put64(hostAddr(s_arrayBase[i]));
+    put64(u64(reinterpret_cast<uintptr_t>(copy)));
     put32(size);
     put8(0);  // big-endian
 }
@@ -143,6 +183,15 @@ void sizeArrays(const u8* p, u32 count, u32 fmt) {
                            {(c >> 14) & 1, (c >> 15) & 7}, {(c >> 23) & 1, (c >> 24) & 7}};
     for (u32 i = 0; i < 8; i++) attr((hi >> (2 * i)) & 3, 4 + i, (tex[i][0] ? 2 : 1) * kComp[tex[i][1]]);
 
+    static const bool s_check = std::getenv("SA2_GX_CHECK") != nullptr;
+    if (s_check) {
+        u32 total = 0;
+        for (u32 k = 0; k < nops; k++) total += ops[k].skip ? ops[k].skip : ops[k].idxSize;
+        static int s_bad = 0;
+        if (total != vertexSize(fmt) && s_bad++ < 10)
+            log("[gx] layout mismatch: ops %u bytes, vertexSize %u (fmt %u VCD %08X/%08X VAT %08X %08X %08X)\n", total,
+                vertexSize(fmt), fmt, lo, hi, a, b, c);
+    }
     s32 maxIdx[12];
     u32 elemOf[12] = {};
     for (s32& m : maxIdx) m = -1;
@@ -375,8 +424,16 @@ size_t command(const u8* p, size_t n, int depth) {
                 static int s_warned = 0;
                 if (s_warned++ < 5) log("[gx] draw %02X uses arrays %03X with no base (VCD %08X/%08X)\n", op, miss, s_vcdLo, s_vcdHi);
             }
-            const size_t len = 3 + size_t(be16(p + 1)) * vertexSize(op & 7);
+            const u32 count = be16(p + 1);
+            const size_t len = 3 + size_t(count) * vertexSize(op & 7);
             if (n < len) return 0;
+            if (s_skipDraws.count(s_drawIndex++)) return len;  // SA2_SKIP_DRAWS (debugging)
+            // Too few vertices for one primitive draws nothing on the hardware. The game's model
+            // code emits such draws (e.g. empty triangle strips); Aurora would turn them into a
+            // bogus strip that the next draw merges into, drawing its triangles as a strip.
+            const u32 prim = op & 0xF8;
+            const u32 minCount = prim == 0x80 || prim == 0x88 ? 4 : prim >= 0xA8 && prim < 0xB8 ? 2 : prim == 0xB8 ? 1 : 3;
+            if (count < minCount) return len;
             sizeArrays(p + 3, be16(p + 1), op & 7);
             putBytes(p, len);
             return len;
@@ -411,6 +468,7 @@ bool redirectedToMemory() {
 std::mutex s_frameLock;
 std::condition_variable s_frameCv;
 std::vector<u8> s_ready;
+std::vector<std::unique_ptr<u8[]>> s_readySnapshots;
 bool s_haveReady = false;
 }  // namespace
 
@@ -458,15 +516,21 @@ void gxEndFrame() {
     if (s_haveReady) s_ready.insert(s_ready.end(), s_out.begin(), s_out.end());
     else s_ready.swap(s_out);
     s_out.clear();
+    for (auto& chunk : s_arena.chunks) s_readySnapshots.push_back(std::move(chunk));
+    s_arena = {};
+    std::fill(std::begin(s_arraySent), std::end(s_arraySent), 0u);  // next frame snapshots afresh
+    s_drawIndex = 0;
     s_haveReady = true;
     s_frameCv.notify_all();
 }
 
-bool gxTakeFrame(std::vector<u8>& out, int waitMs) {
+bool gxTakeFrame(std::vector<u8>& out, std::vector<std::unique_ptr<u8[]>>& snapshots, int waitMs) {
     std::unique_lock lk(s_frameLock);
     if (!s_frameCv.wait_for(lk, std::chrono::milliseconds(waitMs), [] { return s_haveReady; })) return false;
     out.swap(s_ready);
     s_ready.clear();
+    snapshots.clear();  // the previous frame's: Aurora is done with it
+    snapshots.swap(s_readySnapshots);
     s_haveReady = false;
     s_frameCv.notify_all();
     return true;

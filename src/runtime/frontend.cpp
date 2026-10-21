@@ -20,6 +20,7 @@
 #include "gx/fifo.hpp"
 #include "webgpu/gpu.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -264,6 +265,7 @@ void collectFrameDump() {
 }  // namespace
 
 u64 viRetraces();  // src/runtime/hle_hw.cpp
+extern std::atomic<u64> g_relLinkFrame[256];  // src/runtime/dispatch.cpp
 
 void padSnapshot(u8 out[4][12]) {
     std::lock_guard g(s_padLock);
@@ -314,6 +316,7 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
     const char* dumpDir = std::getenv("SA2_DUMP_DIR");
     const u64 dumpEvery = std::getenv("SA2_DUMP_EVERY") ? std::strtoull(std::getenv("SA2_DUMP_EVERY"), nullptr, 10) : 60;
     std::vector<u8> frame;
+    std::vector<std::unique_ptr<u8[]>> snapshots;  // array data the frame's commands point into
     u64 presented = 0;
     for (;;) {
         bool exiting = false;
@@ -321,7 +324,7 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
             if (ev->type == AURORA_EXIT) exiting = true;
         if (exiting) break;
         pollPads();
-        if (!gxTakeFrame(frame, 16)) continue;  // keep the window responsive while the game loads
+        if (!gxTakeFrame(frame, snapshots, 16)) continue;  // keep the window responsive while the game loads
         static u64 s_taken = 0, s_refused = 0;
         if (++s_taken <= 3 || s_taken % 600 == 0)
             log("[frontend] game frame %llu: %zu bytes of GX commands\n", (unsigned long long)s_taken, frame.size());
@@ -410,12 +413,23 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
                 std::fclose(f);
             }
         }
+        // SA2_DUMP_FROM counts from the start, or with SA2_DUMP_REL=<module id> from that REL's link.
         static const u64 s_dumpFrom = std::getenv("SA2_DUMP_FROM") ? std::strtoull(std::getenv("SA2_DUMP_FROM"), nullptr, 10) : 0;
-        if (dumpDir && dumpEvery && presented >= s_dumpFrom && presented % dumpEvery == 0) {
+        static const int s_dumpRel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) : -1;
+        const u64 relLink = s_dumpRel >= 0 ? g_relLinkFrame[s_dumpRel & 255].load() : 1;
+        const u64 dumpAt = relLink ? relLink - 1 + s_dumpFrom : ~0ull;
+        if (dumpDir && dumpEvery && presented >= dumpAt && (presented - dumpAt) % dumpEvery == 0) {
             if (std::getenv("SA2_DUMP_QUAD") || (s_isolate && !std::strcmp(s_isolate, "quad"))) requestFrameDump(presented);
             char path[512];
             std::snprintf(path, sizeof path, "%s/frame_%05llu.rgba", dumpDir, (unsigned long long)presented);
             dumpEfb(path);
+            if (std::getenv("SA2_GXDUMP")) {  // the frame's command stream too (tools/gxdump.py)
+                std::snprintf(path, sizeof path, "%s/frame_%05llu.gx", dumpDir, (unsigned long long)presented);
+                if (std::FILE* f = std::fopen(path, "wb")) {
+                    std::fwrite(frame.data(), 1, frame.size(), f);
+                    std::fclose(f);
+                }
+            }
         }
         aurora_end_frame();
         if (presented % 300 == 0 || presented == 30) {
