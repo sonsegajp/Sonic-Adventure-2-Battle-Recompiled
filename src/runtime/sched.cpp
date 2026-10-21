@@ -130,6 +130,7 @@ void maybePreempt(std::unique_lock<std::mutex>& lk) {
 }
 
 void threadMain(Thread* t) {
+    profileRegisterThread();
     t_self = t;
     {
         std::unique_lock lk(g_m);
@@ -172,6 +173,7 @@ bool inInterrupt() { return t_inIrq; }
 Ctx* currentCtx() { return t_inIrq ? &g_irqCtx : (t_self ? t_self->ctx : nullptr); }
 
 void adoptBootThread(u32 guest, Ctx& ctx) {
+    profileRegisterThread();
     std::unique_lock lk(g_m);
     auto* t = new Thread;
     t->guest = guest;
@@ -410,6 +412,7 @@ std::multimap<u64, AlarmEntry> g_alarms;  // key: time base tick
 bool g_timerStarted = false;
 
 void timerMain() {
+    profileRegisterThread();
     std::unique_lock lk(g_am);
     for (;;) {
         if (g_alarms.empty()) {

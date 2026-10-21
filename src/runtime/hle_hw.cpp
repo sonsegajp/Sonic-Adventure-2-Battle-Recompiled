@@ -26,6 +26,7 @@ std::atomic<u32> s_xfb{0};
 std::atomic<u64> s_frames{0};
 
 void viThread() {
+    profileRegisterThread();
     using clock = std::chrono::steady_clock;
     const auto period = std::chrono::nanoseconds(1000000000ll * 1001 / 60000);  // 59.94 Hz
     auto next = clock::now() + period;
@@ -72,14 +73,20 @@ HLE(ARStartDMA) {  // (type, main memory, aram, length): type 0 main->ARAM, 1 AR
 
 // ---- AI: the DMA "plays" in real time; each finished block raises the AI DMA interrupt, whose
 // handler calls the game's AIRegisterDMACallback (the audio frame tick) ----
+void audioPushAi(u32 addr, u32 bytes);  // src/runtime/audio.cpp
 namespace {
 std::atomic<bool> s_aiRunning{false};
 void aiThread() {
+    profileRegisterThread();
     using clock = std::chrono::steady_clock;
     auto next = clock::now();
     while (s_aiRunning) {
         const u32 blocks = mmioGet16(0x5036) & 0x7FFF;
         const u32 bytes = (blocks ? blocks : 1) * 32;
+        if (blocks && (mmioGet16(0x5036) & 0x8000)) {  // the block now playing goes to the host
+            const u32 src = ((mmioGet16(0x5030) & 0x3FF) << 16 | mmioGet16(0x5032)) & ~31u;
+            audioPushAi(0x80000000u | src, bytes);
+        }
         next += std::chrono::nanoseconds(u64(bytes / 4) * 1000000000ull / 32000);
         std::this_thread::sleep_until(next);
         if (mmioGet16(0x5036) & 0x8000)

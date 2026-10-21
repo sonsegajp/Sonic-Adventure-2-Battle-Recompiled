@@ -68,6 +68,7 @@ void complete(const Request& r, s32 result) {
 }
 
 void worker() {
+    profileRegisterThread();
     std::vector<u8> buf;
     for (;;) {
         Request r;

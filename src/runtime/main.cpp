@@ -1,6 +1,6 @@
 // Developer entry point (sa2b): load main.dol into guest memory, set up the boot block the IPL
 // would leave behind, and run the recompiled __start.
-//   sa2b --dol <main.dol> --iso <disc image> [--trace]
+//   sa2b --dol <main.dol> --iso <disc image> [--headless] [--mute] [--frames N] [--trace]
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
 
@@ -19,6 +19,7 @@ void dumpAllThreads();                       // src/runtime/cpu.cpp
 void installCrashHandler();                  // src/runtime/crash.cpp
 void installWatch(u32 guest, u32 len);       // src/runtime/crash.cpp
 int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*startGuest)());  // frontend.cpp
+void audioInit(bool enabled);                // src/runtime/audio.cpp
 }
 
 using namespace rt;
@@ -52,7 +53,7 @@ static void setupLowMem(const std::vector<u8>& discHeader) {
 int main(int argc, char** argv) {
     std::string dolPath = "orig/main.dol", isoPath;
     int watchSecs = 0;
-    bool headless = false;
+    bool headless = false, mute = std::getenv("SA2_MUTE") != nullptr;
     u64 maxFrames = 0;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
@@ -61,9 +62,11 @@ int main(int argc, char** argv) {
         else if (a == "--trace") g_traceOn = true;
         else if (a == "--watch" && i + 1 < argc) watchSecs = std::atoi(argv[++i]);
         else if (a == "--headless") headless = true;
+        else if (a == "--mute") mute = true;
         else if (a == "--frames" && i + 1 < argc) maxFrames = std::strtoull(argv[++i], nullptr, 10);
     }
     installCrashHandler();
+    audioInit(!headless && !mute);  // headless runs are always silent
     if (!memInit()) return std::fprintf(stderr, "out of memory\n"), 1;
     std::vector<u8> dol;
     if (!readFile(dolPath, dol)) return std::fprintf(stderr, "can't read %s\n", dolPath.c_str()), 1;

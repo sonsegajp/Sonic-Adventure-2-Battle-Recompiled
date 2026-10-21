@@ -23,6 +23,7 @@ inline u32 phys(u32 a) { return a & 0x01FFFFFF; }
 constexpr u32 kHleRegion = 0x80000000 + kMem1Size;
 constexpr u32 kHleRegionEnd = 0x80000000 + kHostMemSize;
 u32 hleAlloc(u32 size, u32 align = 32);
+void profileRegisterThread();  // src/runtime/profile.cpp (SA2_PROFILE)
 inline const char* gstr(u32 a) { return reinterpret_cast<const char*>(hostp(a)); }
 
 // ---- dispatch ----
