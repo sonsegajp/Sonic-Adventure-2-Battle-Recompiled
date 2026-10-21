@@ -14,6 +14,39 @@ target_include_directories(sa2_recompiler PUBLIC src)
 add_executable(sa2recompile tools/recomp/sa2recompile.cpp)
 target_link_libraries(sa2recompile PRIVATE sa2_recompiler)
 
+# ---- Aurora: GX renderer (WebGPU/Dawn), window, controllers (extern/aurora, MIT) ---------------
+# The disc is read by our own DVD layer and saves will go through our CARD layer, so Aurora's DVD
+# (nod) and CARD components are off.
+# Local changes to Aurora are kept as patches (patches/aurora) so the submodule stays pristine;
+# each is applied once (a reverse check tells an applied patch apart).
+file(GLOB AURORA_PATCHES ${CMAKE_SOURCE_DIR}/patches/aurora/*.patch)
+list(SORT AURORA_PATCHES)
+foreach (_patch ${AURORA_PATCHES})
+    execute_process(COMMAND git apply --reverse --check ${_patch}
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/extern/aurora RESULT_VARIABLE _applied OUTPUT_QUIET ERROR_QUIET)
+    if (NOT _applied EQUAL 0)
+        execute_process(COMMAND git apply ${_patch} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/extern/aurora
+            RESULT_VARIABLE _result)
+        if (NOT _result EQUAL 0)
+            # Git for Windows' core.autocrlf=true checks the submodule out with CRLF and LF patches
+            # then fail: switch it off, rewrite the files with LF, and try again.
+            set(_aurora ${CMAKE_SOURCE_DIR}/extern/aurora)
+            execute_process(COMMAND git config core.autocrlf false WORKING_DIRECTORY ${_aurora})
+            execute_process(COMMAND git rm -r -q --cached . WORKING_DIRECTORY ${_aurora} OUTPUT_QUIET ERROR_QUIET)
+            execute_process(COMMAND git reset -q --hard WORKING_DIRECTORY ${_aurora})
+            execute_process(COMMAND git checkout-index -f -a WORKING_DIRECTORY ${_aurora})
+            execute_process(COMMAND git apply ${_patch} WORKING_DIRECTORY ${_aurora} RESULT_VARIABLE _result)
+            if (NOT _result EQUAL 0)
+                message(FATAL_ERROR "Failed to apply Aurora patch ${_patch}")
+            endif ()
+        endif ()
+        message(STATUS "Applied Aurora patch ${_patch}")
+    endif ()
+endforeach ()
+set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
+set(AURORA_ENABLE_CARD OFF CACHE BOOL "" FORCE)
+add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
+
 # ---- Developer build: runtime + the game recompiled at build time (sa2b) ----------------------
 # Generate with: sa2recompile --dol orig/main.dol --rels orig/rel --names config/GSNE8P/names.txt
 #                --out build/gen      (nothing generated is ever committed)
@@ -28,6 +61,20 @@ if (SA2_GEN_SOURCES)
     set_source_files_properties(${SA2_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS
         "/O2;/clang:-g0;/clang:-funwind-tables;-Wno-unused-label;-Wno-unused-variable;-Wno-unused-but-set-variable")
     target_compile_options(sa2b PRIVATE /EHsc)
+    target_link_libraries(sa2b PRIVATE aurora::core aurora::gx aurora::vi aurora::pad aurora::mtx)
+    # The GX bridge feeds Aurora's command FIFO directly (internal headers).
+    target_include_directories(sa2b PRIVATE ${CMAKE_SOURCE_DIR}/extern/aurora/lib)
+    if (WIN32)
+        add_custom_command(TARGET sa2b POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b> $<TARGET_FILE_DIR:sa2b>
+            COMMAND_EXPAND_LISTS)
+        # Dawn's D3D12 backend loads the shader compiler DLLs at run time.
+        file(GLOB _dawn_dx_dlls "${CMAKE_BINARY_DIR}/_deps/dawn_prebuilt-src/bin/dx*.dll")
+        if (_dawn_dx_dlls)
+            add_custom_command(TARGET sa2b POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dawn_dx_dlls} $<TARGET_FILE_DIR:sa2b>)
+        endif ()
+    endif ()
 else ()
     message(STATUS "No recompiler output in ${SA2_GEN_DIR}; skipping the sa2b developer build")
 endif ()

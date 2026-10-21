@@ -16,6 +16,8 @@
 namespace rt {
 void dvdOpenDisc(const std::string& path);  // src/runtime/hle_dvd.cpp
 void dumpAllThreads();                       // src/runtime/cpu.cpp
+void installCrashHandler();                  // src/runtime/crash.cpp
+int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*startGuest)());  // frontend.cpp
 }
 
 using namespace rt;
@@ -49,13 +51,18 @@ static void setupLowMem(const std::vector<u8>& discHeader) {
 int main(int argc, char** argv) {
     std::string dolPath = "orig/main.dol", isoPath;
     int watchSecs = 0;
+    bool headless = false;
+    u64 maxFrames = 0;
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--dol" && i + 1 < argc) dolPath = argv[++i];
         else if (a == "--iso" && i + 1 < argc) isoPath = argv[++i];
         else if (a == "--trace") g_traceOn = true;
         else if (a == "--watch" && i + 1 < argc) watchSecs = std::atoi(argv[++i]);
+        else if (a == "--headless") headless = true;
+        else if (a == "--frames" && i + 1 < argc) maxFrames = std::strtoull(argv[++i], nullptr, 10);
     }
+    installCrashHandler();
     if (!memInit()) return std::fprintf(stderr, "out of memory\n"), 1;
     std::vector<u8> dol;
     if (!readFile(dolPath, dol)) return std::fprintf(stderr, "can't read %s\n", dolPath.c_str()), 1;
@@ -83,9 +90,13 @@ int main(int argc, char** argv) {
             }
         }).detach();
     }
-    static Ctx boot;
-    boot.msr = 0;  // __start runs with interrupts off; OSInit enables them
-    boot.call(entry);
-    log("[boot] __start returned\n");
-    return 0;
+    static u32 s_entry;
+    s_entry = entry;
+    // The game runs on its own host thread; this one owns the window.
+    return runFrontend(argc, argv, headless, maxFrames, [] {
+        static Ctx boot;
+        boot.msr = 0;  // __start runs with interrupts off; OSInit enables them
+        boot.call(s_entry);
+        log("[boot] __start returned\n");
+    });
 }

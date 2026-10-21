@@ -1,6 +1,7 @@
 // Video retrace, ARAM, audio DMA pacing and controllers. The SDK's own interrupt handlers stay
 // native: a device "interrupt" sets the status bit the handler checks and calls the handler the
 // game registered in the OS interrupt table (__OSSetInterruptHandler, table at 0x80003040).
+#include "runtime/gx.h"
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
 
@@ -51,6 +52,7 @@ HLE(VIInit) {
 HLE(VISetNextFrameBuffer) {
     s_xfb = c.r[3];
     callOriginal(c, "VISetNextFrameBuffer");
+    gxEndFrame();  // the frame's GX commands go to the renderer
 }
 
 HLE(__ARChecksize) {
@@ -102,14 +104,16 @@ HLE(PADInit) { c.r[3] = 1; }
 HLE(PADReset) { c.r[3] = 1; }
 HLE(PADRecalibrate) { c.r[3] = 1; }
 HLE(PADControlMotor) {}
+void padSnapshot(u8 out[4][12]);  // src/runtime/frontend.cpp (host controllers via Aurora)
 HLE(PADRead) {
-    const u32 status = c.r[3];
+    u8 pads[4][12];
+    padSnapshot(pads);
+    u32 mask = 0;
     for (u32 i = 0; i < 4; i++) {
-        const u32 s = status + i * 12;
-        std::memset(hostp(s), 0, 12);
-        wr8(s + 10, i == 0 ? 0 : u32(-1));  // err: PAD_ERR_NONE / PAD_ERR_NO_CONTROLLER
+        std::memcpy(hostp(c.r[3] + i * 12), pads[i], 12);
+        if (s8(pads[i][10]) == 0) mask |= 0x80000000u >> i;
     }
-    c.r[3] = 0x80000000;  // connected-ports mask (PAD_CHAN0)
+    c.r[3] = mask;
 }
 
 }  // namespace rt

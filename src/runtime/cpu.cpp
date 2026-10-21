@@ -172,7 +172,7 @@ void Ctx::mtmsr(u32 v) {
     if (wasOff && (msr & 0x8000)) poll();
 }
 
-void Ctx::syscall() { log("[cpu] sc at lr=%08X ignored\n", lr); }
+void Ctx::syscall() {}  // sc: PPCSync in the SDK; nothing to synchronise natively
 void Ctx::trap(u32 pc) { fatal("trap at %08X (lr=%08X)", pc, lr); }
 void Ctx::unimplemented(u32 pc, u32 insn) { fatal("unimplemented instruction %08X at %08X (lr=%08X)", insn, pc, lr); }
 
