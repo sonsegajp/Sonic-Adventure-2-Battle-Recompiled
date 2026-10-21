@@ -40,9 +40,38 @@ void auroraLog(AuroraLogLevel level, const char* module, const char* message, un
     if (level == LOG_FATAL) std::abort();
 }
 
+// Scripted input for automated runs: SA2_PRESS="300:A,420:START,..." holds the buttons on port 1
+// for 8 frames from the given presented frame.
+u64 s_frameNo = 0;
+u16 scriptedButtons() {
+    static const std::vector<std::pair<u64, u16>> script = [] {
+        std::vector<std::pair<u64, u16>> v;
+        const char* s = std::getenv("SA2_PRESS");
+        while (s && *s) {
+            const u64 frame = std::strtoull(s, const_cast<char**>(&s), 10);
+            if (*s != ':') break;
+            const char* name = ++s;
+            while (*s && *s != ',') s++;
+            const std::string b(name, size_t(s - name));
+            const u16 mask = b == "A" ? PAD_BUTTON_A : b == "B" ? PAD_BUTTON_B : b == "X" ? PAD_BUTTON_X
+                           : b == "Y" ? PAD_BUTTON_Y : b == "START" ? PAD_BUTTON_START : b == "UP" ? PAD_BUTTON_UP
+                           : b == "DOWN" ? PAD_BUTTON_DOWN : b == "LEFT" ? PAD_BUTTON_LEFT : b == "RIGHT" ? PAD_BUTTON_RIGHT : 0;
+            v.push_back({frame, mask});
+            if (*s == ',') s++;
+        }
+        return v;
+    }();
+    u16 held = 0;
+    for (auto& [f, m] : script)
+        if (s_frameNo >= f && s_frameNo < f + 8) held |= m;
+    return held;
+}
+
 void pollPads() {
     PADStatus st[4]{};
     PADRead(st);
+    st[0].err = 0;  // port 1 is always connected: the keyboard stands in when there is no gamepad
+    st[0].button |= scriptedButtons();
     std::lock_guard g(s_padLock);
     for (int i = 0; i < 4; i++) {
         u8* p = s_padGuest[i];
@@ -355,6 +384,7 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         }
         aurora::gx::fifo::write_data(frame.data(), u32(frame.size()));
         presented++;
+        s_frameNo = presented;
         if (const char* gxDump = std::getenv("SA2_GXDUMP_FRAME"); gxDump && presented == std::strtoull(gxDump, nullptr, 10)) {
             if (std::FILE* f = std::fopen("build/gxframe.bin", "wb")) {  // decode with tools/gxdump.py
                 std::fwrite(frame.data(), 1, frame.size(), f);
