@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -57,11 +58,15 @@ void dumpRing(const Ring* r, u32 n) {
     }
 }
 }  // namespace
+std::atomic<int> g_traceBurst{0};  // print this many upcoming function entries (any thread)
 void trace_enter(u32 addr, Ctx& c) {
-    (void)c;
     Ring* r = myRing();
     r->a[r->pos++ & 63] = addr;
     r->calls++;
+    if (g_traceBurst.load(std::memory_order_relaxed) > 0 && g_traceBurst.fetch_sub(1) > 0) {
+        const char* n = guestName(addr);
+        log("[trace] %08X %s (lr %08X r3 %08X)\n", addr, n ? n : "", c.lr, c.r[3]);
+    }
 }
 static void dumpTrace() {
     std::fprintf(stdout, "recent guest functions on this thread (oldest first):\n");

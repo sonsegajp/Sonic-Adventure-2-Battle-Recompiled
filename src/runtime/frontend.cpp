@@ -261,6 +261,8 @@ void collectFrameDump() {
 }
 }  // namespace
 
+u64 viRetraces();  // src/runtime/hle_hw.cpp
+
 void padSnapshot(u8 out[4][12]) {
     std::lock_guard g(s_padLock);
     std::memcpy(out, s_padGuest, sizeof s_padGuest);
@@ -399,11 +401,18 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         }
         aurora_end_frame();
         if (presented % 300 == 0 || presented == 30) {
+            static auto s_last = std::chrono::steady_clock::now();
+            static u64 s_lastFrames = 0, s_lastRetraces = 0;
+            const auto now = std::chrono::steady_clock::now();
+            const double secs = std::chrono::duration<double>(now - s_last).count();
+            const u64 retraces = viRetraces();
+            const double fps = secs > 0 ? double(presented - s_lastFrames) / secs : 0;
+            const double hz = secs > 0 ? double(retraces - s_lastRetraces) / secs : 0;
+            s_last = now, s_lastFrames = presented, s_lastRetraces = retraces;
             const AuroraStats* st = aurora_get_stats();
-            log("[frontend] %llu frames presented (%zu bytes last); Aurora: %u draws (%u merged), pipelines %u queued %u created, "
-                "verts %u B, textures %u B\n",
-                (unsigned long long)presented, frame.size(), st->drawCallCount, st->mergedDrawCallCount, st->queuedPipelines,
-                st->createdPipelines, st->lastVertSize, st->lastTextureUploadSize);
+            log("[frontend] %llu frames, %.1f fps (VI %.1f Hz); %zu bytes GX; Aurora: %u draws (%u merged), %u pipelines\n",
+                (unsigned long long)presented, fps, hz, frame.size(), st->drawCallCount, st->mergedDrawCallCount,
+                st->createdPipelines);
         }
         if (maxFrames && presented >= maxFrames) break;
     }

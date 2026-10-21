@@ -17,10 +17,11 @@ void vlog(const char* fmt, va_list ap);
 bool memInit();
 bool loadDol(const std::vector<u8>& dol, u32& entry);
 inline u32 phys(u32 a) { return a & 0x01FFFFFF; }
-// Bump allocator for host-owned guest objects (interrupt stack, HLE structures), placed in the
-// top of MEM1 above the game's arena (arena hi is lowered to kHleRegion).
-constexpr u32 kHleRegion = 0x81700000;
-constexpr u32 kHleRegionEnd = 0x81800000;
+// Bump allocator for host-owned guest objects (interrupt stack, HLE structures). They live past
+// the end of MEM1, in the rest of the 32 MB guest window: no game code addresses that range, so
+// all of MEM1 stays laid out as the IPL leaves it (the game hardcodes buffers up near its top).
+constexpr u32 kHleRegion = 0x80000000 + kMem1Size;
+constexpr u32 kHleRegionEnd = 0x80000000 + kHostMemSize;
 u32 hleAlloc(u32 size, u32 align = 32);
 inline const char* gstr(u32 a) { return reinterpret_cast<const char*>(hostp(a)); }
 

@@ -5,8 +5,11 @@
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <string>
 #include <cstring>
 #include <cstdio>
 #include <deque>
@@ -18,6 +21,7 @@ namespace rt {
 
 namespace {
 std::FILE* s_disc = nullptr;
+std::vector<u8> s_fstCopy;  // the FST as read from the disc, for SA2_DVD_LOG checks
 std::mutex s_discLock;
 
 // DVDCommandBlock (2001 SDK)
@@ -82,7 +86,27 @@ void worker() {
     }
 }
 
+// File containing a disc offset (from the FST in guest memory), for SA2_DVD_LOG.
+std::string fileAt(u64 offset) {
+    const u32 fst = rd32(0x80000038);
+    if (!fst) return "?";
+    const u32 n = rd32(fst + 8);
+    const u32 strtab = fst + n * 12;
+    // Walk the tree keeping the directory path of each entry.
+    std::vector<std::pair<u32, std::string>> dirs{{n, ""}};
+    for (u32 i = 1; i < n; i++) {
+        while (dirs.size() > 1 && i >= dirs.back().first) dirs.pop_back();
+        const u32 w0 = rd32(fst + i * 12), w1 = rd32(fst + i * 12 + 4), w2 = rd32(fst + i * 12 + 8);
+        const std::string name = gstr(strtab + (w0 & 0xFFFFFF));
+        if (w0 >> 24) dirs.push_back({w2, dirs.back().second + name + "/"});
+        else if (offset >= w1 && offset < u64(w1) + w2) return dirs.back().second + name + "+" + std::to_string(offset - w1);
+    }
+    return "?";
+}
+
 void submit(u32 block, u32 addr, u32 length, u64 offset, u32 callback, u32 command) {
+    static const bool s_log = std::getenv("SA2_DVD_LOG") != nullptr;
+    if (s_log) log("[dvd] read %s (%u bytes) -> %08X\n", fileAt(offset).c_str(), length, addr);
     wr32(block + CB_COMMAND, command);
     wr32(block + CB_STATE, ST_BUSY);
     wr32(block + CB_ADDR, addr);
@@ -103,16 +127,45 @@ void submit(u32 block, u32 addr, u32 length, u64 offset, u32 callback, u32 comma
 void dvdOpenDisc(const std::string& path) {
     s_disc = std::fopen(path.c_str(), "rb");
     if (!s_disc) fatal("can't open disc image %s", path.c_str());
-    // The IPL loads the FST to the top of memory and records it in the boot block.
+    // The apploader loads the FST to the top of MEM1 (room for the header's maximum FST size),
+    // records it in the boot block and puts arena hi just below it. The game relies on this: it
+    // hardcodes buffers (movie work area, module load address) up to a few hundred KB below.
     u8 h[12];
     readRaw(0x424, h, 12);
-    const u32 fstOff = u32(h[0]) << 24 | h[1] << 16 | h[2] << 8 | h[3];
-    const u32 fstSize = u32(h[4]) << 24 | h[5] << 16 | h[6] << 8 | h[7];
-    const u32 fst = hleAlloc(fstSize, 32);
+    auto be = [&](int o) { return u32(h[o]) << 24 | h[o + 1] << 16 | h[o + 2] << 8 | h[o + 3]; };
+    const u32 fstOff = be(0), fstSize = be(4), fstMax = std::max(be(8), fstSize);
+    const u32 fst = (0x80000000 + kMem1Size - fstMax) & ~31u;
     readRaw(fstOff, hostp(fst), fstSize);
+    s_fstCopy.assign(static_cast<const u8*>(hostp(fst)), static_cast<const u8*>(hostp(fst)) + fstSize);
     wr32(0x80000038, fst);
     wr32(0x8000003C, fstSize);
+    wr32(0x80000034, fst);  // arena hi
     log("[dvd] disc %s, FST %u bytes at %08X\n", path.c_str(), fstSize, fst);
+}
+
+// Path lookups and directory changes stay native; with SA2_DVD_LOG they are logged.
+HLE(DVDConvertPathToEntrynum) {
+    static const bool s_log = std::getenv("SA2_DVD_LOG") != nullptr;
+    const std::string path = gstr(c.r[3]);
+    callOriginal(c, "DVDConvertPathToEntrynum");
+    if (s_log) log("[dvd] path '%s' -> entry %d\n", path.c_str(), s32(c.r[3]));
+    if (s_log && s32(c.r[3]) < 0) {
+        // Is the FST in guest memory still the one read from the disc?
+        const u32 fst = rd32(0x80000038);
+        const u8* g = static_cast<const u8*>(hostp(fst));
+        u32 diffs = 0, first = 0;
+        for (u32 i = 0; i < s_fstCopy.size(); i++)
+            if (g[i] != s_fstCopy[i] && diffs++ == 0) first = i;
+        log("[dvd] FST at %08X: %u bytes differ from the disc's", fst, diffs);
+        if (diffs) log(" (first at +%X = %08X)", first, fst + first);
+        log("; current dir %d\n", s32(rd32(c.r[13] - 0x7568)));
+    }
+}
+HLE(DVDChangeDir) {
+    static const bool s_log = std::getenv("SA2_DVD_LOG") != nullptr;
+    const std::string path = gstr(c.r[3]);
+    callOriginal(c, "DVDChangeDir");
+    if (s_log) log("[dvd] chdir '%s' -> %d\n", path.c_str(), s32(c.r[3]));
 }
 
 HLE(__DVDInitWA) {}

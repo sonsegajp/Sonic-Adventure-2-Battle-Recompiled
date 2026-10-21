@@ -45,6 +45,7 @@ struct ThreadExit {};
 void adoptBootThread(u32 guest, Ctx& ctx);
 Thread* current();
 bool inInterrupt();
+Ctx* currentCtx();  // guest context of the calling host thread (debugging)
 
 // OS thread API (guest addresses).
 bool create(u32 guest, u32 entry, u32 arg, u32 stackTop, u32 stackSize, s32 prio, u32 attr);

@@ -3,6 +3,9 @@
 #include "runtime/modules.h"
 #include "runtime/runtime.h"
 
+#include <atomic>
+#include <cstdlib>
+
 namespace rt {
 
 namespace {
@@ -52,13 +55,13 @@ void registerRelModule(u32 id) {
 }
 
 void unregisterRelModule(u32 id) {
+    // Like the console, an unlinked module's code stays callable at its old addresses until
+    // something else is linked there (the game calls into a module after OSUnlink, e.g. eventD's
+    // callbacks); a module linked later at the same addresses simply overwrites these entries.
     const RelModuleCode* m = relCode(id);
-    if (!m) return;
-    for (u32 i = 0; i < m->count; i++) {
-        const u32 a = m->funcs[i].addr;
-        dispatchUnregister(g_relBase[id][a >> 24] + (a & 0xFFFFFF));
-    }
-    log("[rel] unlinked module %u (%s)\n", id, m->file);
+    if (m) log("[rel] unlinked module %u (%s)\n", id, m->file);
+    extern std::atomic<int> g_traceBurst;
+    if (const char* n = std::getenv("SA2_TRACE_AFTER_UNLINK")) g_traceBurst = std::atoi(n);
 }
 
 void Ctx::call(u32 addr) {

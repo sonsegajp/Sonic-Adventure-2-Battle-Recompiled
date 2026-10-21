@@ -17,6 +17,7 @@ namespace rt {
 void dvdOpenDisc(const std::string& path);  // src/runtime/hle_dvd.cpp
 void dumpAllThreads();                       // src/runtime/cpu.cpp
 void installCrashHandler();                  // src/runtime/crash.cpp
+void installWatch(u32 guest, u32 len);       // src/runtime/crash.cpp
 int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*startGuest)());  // frontend.cpp
 }
 
@@ -38,8 +39,8 @@ static void setupLowMem(const std::vector<u8>& discHeader) {
     wr32(0x80000028, kMem1Size);   // physical memory size
     wr32(0x8000002C, 0x00000003);  // console type: retail
     wr32(0x80000030, 0);           // arena lo: linker default
-    wr32(0x80000034, kHleRegion);  // arena hi: host-owned objects live above it
-    wr32(0x80000038, 0);           // FST location (DVD is replaced by name)
+    wr32(0x80000034, 0x80000000 + kMem1Size);  // arena hi: lowered to the FST by dvdOpenDisc
+    wr32(0x80000038, 0);                        // FST location, size: set by dvdOpenDisc
     wr32(0x8000003C, 0);
     wr32(0x800000CC, 0);           // TV mode: NTSC
     wr32(0x800000F0, kMem1Size);   // simulated memory size
@@ -79,6 +80,10 @@ int main(int argc, char** argv) {
     if (!isoPath.empty()) dvdOpenDisc(isoPath);  // also places the FST and records it in the boot block
     registerDol();
     resolveHooks();
+    if (const char* w = std::getenv("SA2_WATCH")) {  // SA2_WATCH=<hex address>[:<length>]
+        const char* colon = std::strchr(w, ':');
+        installWatch(u32(std::strtoul(w, nullptr, 16)), colon ? u32(std::strtoul(colon + 1, nullptr, 0)) : 4);
+    }
     log("[boot] %s entry %08X\n", dolPath.c_str(), entry);
     if (watchSecs > 0) {
         g_traceOn = true;

@@ -43,6 +43,7 @@ constexpr u32 kAramSize = 0x1000000;
 }  // namespace
 
 u8* aramPtr(u32 a) { return &s_aram[a & (kAramSize - 1)]; }
+u64 viRetraces() { return s_frames.load(); }
 
 HLE(VIInit) {
     callOriginal(c, "VIInit");

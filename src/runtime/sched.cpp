@@ -169,6 +169,7 @@ void wakeupLocked(u32 queue) {
 
 Thread* current() { return t_self; }
 bool inInterrupt() { return t_inIrq; }
+Ctx* currentCtx() { return t_inIrq ? &g_irqCtx : (t_self ? t_self->ctx : nullptr); }
 
 void adoptBootThread(u32 guest, Ctx& ctx) {
     std::unique_lock lk(g_m);

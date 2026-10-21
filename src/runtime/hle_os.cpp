@@ -143,6 +143,21 @@ HLE(OSUnlink) {
     callOriginal(c, "OSUnlink");
 }
 
+// ---- arena (logged) ----
+HLE(OSSetArenaHi) {
+    log("[os] OSSetArenaHi(%08X) lr %08X\n", c.r[3], c.lr);
+    callOriginal(c, "OSSetArenaHi");
+}
+HLE(OSInitAlloc) {
+    log("[os] OSInitAlloc(%08X, %08X, %d) lr %08X\n", c.r[3], c.r[4], s32(c.r[5]), c.lr);
+    callOriginal(c, "OSInitAlloc");
+}
+HLE(OSCreateHeap) {
+    const u32 lo = c.r[3], hi = c.r[4];
+    callOriginal(c, "OSCreateHeap");
+    log("[os] OSCreateHeap(%08X, %08X) -> %d lr %08X\n", lo, hi, s32(c.r[3]), c.lr);
+}
+
 // ---- reset ----
 HLE(OSResetSystem) {
     log("[os] OSResetSystem(%u, %08X, %u): exiting\n", c.r[3], c.r[4], c.r[5]);
