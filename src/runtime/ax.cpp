@@ -18,6 +18,7 @@
 #include "runtime/runtime.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -213,9 +214,24 @@ void processVoice(Voice& v, u32 offset) {
 }
 
 void processVoices(u32 pb) {
+    static u32 s_frame = 0;
+    static const u32 s_logEvery = std::getenv("SA2_AX_VOICES") ? u32(std::atoi(std::getenv("SA2_AX_VOICES"))) : 0;
+    const bool logNow = s_logEvery && ++s_frame % s_logEvery == 0;
     for (u32 n = 0; pb && n < 256; n++) {
         Voice v;
         for (u32 i = 0; i < kPbWords; i++) v.w[i] = u16(rd16(pb + i * 2));
+        if (logNow && v.w[PB_RUNNING]) {
+            char mix[160] = "";
+            for (u32 i = 0; i < 18; i++) std::snprintf(mix + i * 5, 6, "%04X ", v.w[PB_MIXER + i]);
+            const u32 cur = v.get32(PB_CUR_ADDR);
+            log("[ax] voice %08X fmt %02X stream %u mc %04X ratio %08X env %04X loop %08X end %08X cur %08X "
+                "data %04X %04X %04X %04X upd %u/%u/%u/%u/%u mixer %s\n",
+                pb, v.w[PB_FORMAT], v.w[PB_IS_STREAM], v.w[PB_MIXER_CONTROL], v.get32(PB_RATIO), v.w[PB_VOL],
+                v.get32(PB_LOOP_ADDR), v.get32(PB_END_ADDR), cur, rd16(0) * 0 + (aramPtr(cur * 2)[0] << 8 | aramPtr(cur * 2)[1]),
+                aramPtr(cur * 2 + 2)[0] << 8 | aramPtr(cur * 2 + 3)[0], aramPtr(cur * 2 + 64)[0] << 8 | aramPtr(cur * 2 + 65)[0],
+                aramPtr(cur * 2 + 512)[0] << 8 | aramPtr(cur * 2 + 513)[0], v.w[PB_UPDATES], v.w[PB_UPDATES + 1],
+                v.w[PB_UPDATES + 2], v.w[PB_UPDATES + 3], v.w[PB_UPDATES + 4], mix);
+        }
         const u32 updates = v.get32(PB_UPDATES + 5);
         u32 first = 0;
         for (u32 ms = 0; ms < 5; ms++) {

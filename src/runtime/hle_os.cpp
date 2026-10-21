@@ -101,12 +101,27 @@ HLE(OSSetPeriodicAlarm) {  // (alarm r3, start r5:r6, period r7:r8, handler r9)
 HLE(OSCancelAlarm) { sched::cancelAlarm(c.r[3]); }
 
 // ---- SRAM (normally read over EXI from the RTC chip): a valid, English, stereo setup ----
+// It is placed in the SDK's own SRAM control block (Scb: OSSram, then OSSramEx), because some SDK
+// functions read it there directly instead of locking it (OSGetSoundMode: with the block left
+// empty the game saw a mono console and mixed its stereo music to mono). Scb's address is taken
+// from OSGetSoundMode's code: lis r3, hi / ... / addi r31, r3, lo.
 namespace {
 u32 s_sram = 0, s_sramEx = 0;
+u32 findScb() {
+    const u32 f = guestSymbol("OSGetSoundMode");
+    if (!f) return 0;
+    const u32 lis = rd32(f + 4), addi = rd32(f + 0x14);
+    if ((lis >> 26) != 15 || (addi >> 26) != 14) return 0;
+    return (lis << 16) + u32(s32(s16(addi & 0xFFFF)));
+}
 void sramInit() {
     if (s_sram) return;
-    s_sram = hleAlloc(0x40);
-    s_sramEx = hleAlloc(0x40);
+    s_sram = findScb();
+    if (!s_sram) {
+        log("[os] SRAM control block not found; SRAM readers outside __OSLockSram see nothing\n");
+        s_sram = hleAlloc(0x40);
+    }
+    s_sramEx = s_sram + 0x14;  // OSSramEx follows the 20-byte OSSram
     wr8(s_sram + 0x12, 0);     // language: English
     wr8(s_sram + 0x13, 0x04);  // flags: stereo sound
 }
