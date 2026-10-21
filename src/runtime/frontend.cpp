@@ -2,7 +2,8 @@
 // owns the window: each frame it takes the game's finished GX command stream (src/runtime/gx.cpp),
 // feeds it to Aurora's command processor and presents.
 // Debug/automation: --headless renders with the window hidden; SA2_DUMP_DIR=<dir> writes every
-// SA2_DUMP_EVERY-th frame as raw RGBA (tools/rgba2png.py converts it); --frames N exits after N.
+// SA2_DUMP_EVERY-th frame (from SA2_DUMP_FROM on) as raw RGBA (tools/rgba2png.py converts it);
+// --frames N exits after N.
 #include "runtime/gx.h"
 #include "runtime/runtime.h"
 
@@ -409,7 +410,8 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
                 std::fclose(f);
             }
         }
-        if (dumpDir && dumpEvery && presented % dumpEvery == 0) {
+        static const u64 s_dumpFrom = std::getenv("SA2_DUMP_FROM") ? std::strtoull(std::getenv("SA2_DUMP_FROM"), nullptr, 10) : 0;
+        if (dumpDir && dumpEvery && presented >= s_dumpFrom && presented % dumpEvery == 0) {
             if (std::getenv("SA2_DUMP_QUAD") || (s_isolate && !std::strcmp(s_isolate, "quad"))) requestFrameDump(presented);
             char path[512];
             std::snprintf(path, sizeof path, "%s/frame_%05llu.rgba", dumpDir, (unsigned long long)presented);
