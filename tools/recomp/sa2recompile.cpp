@@ -20,7 +20,7 @@ static bool readFile(const std::filesystem::path& p, std::vector<u8>& out) {
 }
 
 int main(int argc, char** argv) {
-    std::string dolPath, relDir, funcsOut, outDir, namesPath;
+    std::string dolPath, relDir, funcsOut, outDir, namesPath, patchesPath;
     for (int i = 1; i + 1 < argc; i += 2) {
         std::string k = argv[i];
         if (k == "--dol") dolPath = argv[i + 1];
@@ -28,6 +28,7 @@ int main(int argc, char** argv) {
         else if (k == "--funcs") funcsOut = argv[i + 1];
         else if (k == "--out") outDir = argv[i + 1];
         else if (k == "--names") namesPath = argv[i + 1];
+        else if (k == "--patches") patchesPath = argv[i + 1];
     }
     if (dolPath.empty()) {
         std::fprintf(stderr, "usage: sa2recompile --dol main.dol [--rels dir] [--funcs out.tsv]\n");
@@ -57,6 +58,17 @@ int main(int argc, char** argv) {
         }
     }
     analyze(prog);
+    // --patches <file>: main.dol addresses (hex, one per line, '#' comments) where native mod code
+    // can run (src/runtime/mods.cpp registers it by address).
+    if (!patchesPath.empty()) {
+        std::ifstream f(patchesPath);
+        for (std::string line; std::getline(f, line);) {
+            line = line.substr(0, line.find('#'));
+            if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
+            const u32 a = u32(std::stoul(line, nullptr, 16));
+            if (!prog.patchPoints.count(a)) prog.patchPoints.emplace(a, int(prog.patchPoints.size()));
+        }
+    }
     if (!namesPath.empty()) {
         std::ifstream f(namesPath);
         std::string text((std::istreambuf_iterator<char>(f)), {});
@@ -112,6 +124,8 @@ int main(int argc, char** argv) {
         std::printf("emitted %zu files, %.1f MB: %zu functions (%zu HLE), %zu instructions\n", files.size(),
                     bytes / 1048576.0, st.functions, st.hle, st.instructions);
         for (auto& [k, v] : st.unsupported) std::printf("  unsupported %s: %zu\n", k.c_str(), v);
+        std::printf("direct branches to addresses no function starts at: %zu\n", st.unresolvedTargets.size());
+        for (auto& [k, v] : st.unresolvedTargets) std::printf("  %s (%zu)\n", k.c_str(), v);
     }
     return 0;
 }

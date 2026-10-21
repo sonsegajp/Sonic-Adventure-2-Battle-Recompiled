@@ -65,4 +65,8 @@ void raiseInterrupt(u32 id, void (*before)() = nullptr);
 u64 timebase();  // guest time base: 40.5 MHz (bus clock / 4) since boot
 constexpr u64 kTimebaseHz = 40500000;
 
+// ---- mods (src/runtime/mods.cpp) ----
+void modsInit();                                // loads mods/: native ports of code mods, file overrides
+std::string modFile(const std::string& discPath);  // a mod's replacement for a disc file, or empty
+
 }  // namespace rt

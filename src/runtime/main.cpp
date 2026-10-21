@@ -83,6 +83,7 @@ int main(int argc, char** argv) {
     if (!isoPath.empty()) dvdOpenDisc(isoPath);  // also places the FST and records it in the boot block
     registerDol();
     resolveHooks();
+    modsInit();
     if (const char* w = std::getenv("SA2_WATCH")) {  // SA2_WATCH=<hex address>[:<length>]
         const char* colon = std::strchr(w, ':');
         installWatch(u32(std::strtoul(w, nullptr, 16)), colon ? u32(std::strtoul(colon + 1, nullptr, 0)) : 4);

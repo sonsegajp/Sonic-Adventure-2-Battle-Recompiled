@@ -3,7 +3,10 @@
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
 
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
 namespace rt {
 
@@ -39,7 +42,7 @@ HLE(OSRestoreInterrupts) {
 }
 
 // ---- hardware init the host does not need (called from OSInit) ----
-HLE(EXIInit) {}
+// (EXIInit runs natively: the EXI bus is emulated in src/runtime/exi.cpp.)
 HLE(SIInit) {}
 HLE(__OSInitAudioSystem) {}
 // Memory protection/BAT setup runs in real mode through an rfi trampoline: nothing to do natively.
@@ -124,6 +127,10 @@ void sramInit() {
     s_sramEx = s_sram + 0x14;  // OSSramEx follows the 20-byte OSSram
     wr8(s_sram + 0x12, 0);     // language: English
     wr8(s_sram + 0x13, 0x04);  // flags: stereo sound
+    // Memory card flash IDs (all zero) and their checksums (~sum), checked when a card mounts;
+    // tools/mkcard.py formats card images for this ID.
+    wr8(s_sramEx + 0x26, 0xFF);
+    wr8(s_sramEx + 0x27, 0xFF);
 }
 }  // namespace
 HLE(__OSInitSram) { sramInit(); }
@@ -151,6 +158,38 @@ HLE(OSLink) {
     if (id >= 256 || nsec > 32) fatal("OSLink: bad module header at %08X", module);
     for (u32 i = 0; i < nsec; i++) g_relBase[id][i] = rd32(info + i * 8) & ~1u;
     registerRelModule(id);
+    // eventD (80) plays the events listed at 0x801F5958 (its own index walks the list, -1 ends it).
+    // Testing: SA2_EVENT=<n> - the next event the game plays (the boot intro) is event n instead.
+    if (const char* ev = std::getenv("SA2_EVENT"); ev && id == 80) {
+        static bool s_done = false;
+        if (!s_done) {
+            s_done = true;
+            wr32(0x801F5958, u32(std::atoi(ev)));
+            for (u32 i = 1; i < 4; i++) wr32(0x801F5958 + i * 4, u32(-1));
+            log("[test] playing event %d\n", std::atoi(ev));
+        }
+    }
+    if (id == 80 && std::getenv("SA2_EVENT_LOG")) {
+        std::string list;
+        for (u32 i = 0; i < 8; i++) {
+            char b[16];
+            std::snprintf(b, sizeof b, " %d", s32(rd32(0x801F5958 + i * 4)));
+            list += b;
+        }
+        log("[test] event list at link:%s; flag %u\n", list.c_str(), rd8(0x801E50D4));
+    }
+    if (std::getenv("SA2_LINK_STACK")) {  // who loaded it: the guest back chain (LR save words)
+        std::string chain;
+        u32 sp = c.r[1];
+        for (int i = 0; i < 12 && (sp >> 24) == 0x80 + ((sp >> 24) & 1); i++) {
+            sp = rd32(sp);
+            if (!sp) break;
+            char b[16];
+            std::snprintf(b, sizeof b, " %08X", rd32(sp + 4));
+            chain += b;
+        }
+        log("[rel] module %u linked from lr %08X; stack%s\n", id, c.lr, chain.c_str());
+    }
 }
 HLE(OSUnlink) {
     const u32 id = rd32(c.r[3]);

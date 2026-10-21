@@ -10,6 +10,8 @@ namespace rt {
 
 u32 dspRead16(u32 off);
 void dspWrite16(u32 off, u32 v);
+u32 exiRead32(u32 off);  // src/runtime/exi.cpp
+void exiWrite32(u32 off, u32 v);
 
 namespace {
 u8 s_regs[0x10000];  // 0xCC000000-0xCC00FFFF
@@ -31,6 +33,10 @@ void mmioSet16(u32 off, u32 v) {
 
 u32 mmio_rd(u32 a, int size) {
     const u32 o = a & 0xFFFF;
+    if (o >= 0x6800 && o < 0x683C) {  // EXI bus (src/runtime/exi.cpp)
+        const u32 v = exiRead32(o & ~3u);
+        return size == 4 ? v : size == 2 ? (v >> (16 - 8 * (o & 2))) & 0xFFFF : (v >> (24 - 8 * (o & 3))) & 0xFF;
+    }
     if (o >= 0x5000 && o < 0x500C) {  // DSP mailbox/control (src/runtime/dsp.cpp)
         if (size == 4) {
             const u32 hi = dspRead16(o);
@@ -50,6 +56,11 @@ void mmio_wr(u32 a, u32 v, int size) {
     const u32 o = a & 0xFFFF;
     if ((o & 0xFFF8) == 0x8000) {  // GX write-gather pipe
         gxWrite(v, size);
+        return;
+    }
+    if (o >= 0x6800 && o < 0x683C) {
+        if (size == 4) exiWrite32(o, v);
+        else log("[exi] unexpected %d-byte write %08X = %X\n", size, a, v);
         return;
     }
     if (o >= 0x5000 && o < 0x500C) {

@@ -404,6 +404,7 @@ void discover(ModuleInfo& mi, const Scan& scan) {
         if (t >= it->second.end) continue;
         Func f;
         f.start = t;
+        f.body = it->second.start;
         f.end = it->second.end;
         f.alias = true;
         aliases[t] = f;

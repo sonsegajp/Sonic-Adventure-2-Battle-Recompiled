@@ -22,7 +22,9 @@ namespace sa2rc {
 struct Func {
     u32 start = 0;
     u32 end = 0;           // one past the last instruction
-    bool alias = false;    // interior entry point: its body is the tail of the containing function
+    bool alias = false;    // interior entry point of the containing function
+    u32 body = 0;          // alias: start of the containing function, whose whole body it is emitted
+                           // with (entered at `start`) so its branches back into it stay local
     bool hle = false;      // replaced by a host implementation (set from the names file)
     std::string name;      // SDK/library name when known
 };
@@ -39,6 +41,7 @@ struct ModuleInfo {
 struct Program {
     std::vector<Module> modules;  // [0] = main.dol
     std::vector<ModuleInfo> info; // parallel to modules
+    std::map<u32, int> patchPoints;  // main.dol address -> patch point slot (native mods hook in there)
     const Module* byId(u32 id) const {
         for (const auto& m : modules)
             if (m.id == id) return &m;

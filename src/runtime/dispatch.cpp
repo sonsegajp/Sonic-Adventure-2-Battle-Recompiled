@@ -45,7 +45,9 @@ static const RelModuleCode* relCode(u32 id) {
     return nullptr;
 }
 
-std::atomic<u64> g_relLinkFrame[256];  // game frame at which each module was last linked (+1; 0 = never)
+std::atomic<u64> g_relLinkFrame[256];      // game frame at which each module was last linked (+1; 0 = never)
+std::atomic<bool> g_stopRequested{false};  // test runs: the frontend exits at its next frame
+std::atomic<bool> g_relLinked[256];        // which modules are linked now
 
 void registerRelModule(u32 id) {
     const RelModuleCode* m = relCode(id);
@@ -56,6 +58,7 @@ void registerRelModule(u32 id) {
     }
     log("[rel] linked module %u (%s): %u functions, text at %08X\n", id, m->file, m->count, g_relBase[id][1]);
     g_relLinkFrame[id & 255] = gxFrames() + 1;
+    g_relLinked[id & 255] = true;
 }
 
 void unregisterRelModule(u32 id) {
@@ -64,6 +67,9 @@ void unregisterRelModule(u32 id) {
     // callbacks); a module linked later at the same addresses simply overwrites these entries.
     const RelModuleCode* m = relCode(id);
     if (m) log("[rel] unlinked module %u (%s)\n", id, m->file);
+    g_relLinked[id & 255] = false;
+    // Test runs: SA2_STOP_ON_UNLINK=<id> ends the run when that module goes (e.g. an event ended).
+    if (const char* s = std::getenv("SA2_STOP_ON_UNLINK"); s && u32(std::atoi(s)) == id) g_stopRequested = true;
     extern std::atomic<int> g_traceBurst;
     if (const char* n = std::getenv("SA2_TRACE_AFTER_UNLINK")) g_traceBurst = std::atoi(n);
 }

@@ -14,8 +14,9 @@ struct OutputFile {
 };
 
 struct EmitStats {
-    size_t functions = 0, instructions = 0, hle = 0;
+    size_t functions = 0, instructions = 0, hle = 0, patchPoints = 0;
     std::map<std::string, size_t> unsupported;  // mnemonic/opcode -> count
+    std::map<std::string, size_t> unresolvedTargets;  // "module:address" of direct branches to no function
 };
 
 // Splits main.dol into `dolChunks` files and each REL into files of about `relChunkInsns`

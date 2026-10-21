@@ -16,6 +16,7 @@
 #include "runtime/sched.h"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +26,7 @@
 
 namespace rt {
 
+extern std::atomic<u64> g_relLinkFrame[256];  // src/runtime/dispatch.cpp
 u32 mmioGet16(u32 off);
 void mmioSet16(u32 off, u32 v);
 
@@ -291,9 +293,188 @@ void loadTexture(int map, u32 image3) {
     (void)texBytes;
 }
 
+// ---- widescreen: which commands draw to the screen, and where 2D draws sit ----
+// Aurora (patches/aurora/0004) widens perspective views spanning the screen and keeps everything
+// else at its aspect, moved toward the edge it is near. The bridge marks each stretch of commands
+// between EFB copies as drawing to the screen (1) or into a texture (0: decided when the copy that
+// ends it turns out to be a small texture copy - shadow and reflection passes), and classifies each
+// 2D (orthographic) draw by where it lands on the 640-wide logical screen.
+enum : u16 { AUR_WIDE_SEGMENT = 0x0060, AUR_WIDE_2D = 0x0061 };
+size_t s_segmentAt = SIZE_MAX;  // offset in s_out of the current segment's mode byte
+int s_last2D = -1;
+u32 s_xf[0x1058];           // XF registers and matrix memory, as the game wrote them
+u32 s_cpMtxA = 0;           // CP matrix index A: the default position matrix
+u32 s_genMode = 0;          // BP GENMODE (number of textures in bits 0-3)
+u32 s_tex0 = 0;             // address of the texture in map 0
+std::set<u32> s_copyDests;  // texture copy destinations this frame (screen effects draw from them)
+
+void beginSegment() {
+    aurora(AUR_WIDE_SEGMENT);
+    s_segmentAt = s_out.size();
+    put8(1);
+    s_last2D = -1;
+}
+
+float xff(u32 a) { return __builtin_bit_cast(float, s_xf[a]); }
+
+// Where a draw lands, for widescreen placement: its screen extent (logical units) and eye-space
+// depth range. SA2 draws its 2D (HUD, menus, title art) with Ninja's sprite routines under the
+// game's perspective projection: flat quads in screen pixels, at a depth given by the sprite's
+// priority, through Ninja's 2D matrix [-a 0 320a 0 | 0 a -240a 0 | 0 0 1 0], which takes pixels at
+// any depth to the eye space that projects them back onto those pixels. Such sprites and
+// orthographic draws are 2D: full-screen art and backdrop tiles cover the screen, fades stretch,
+// the HUD goes to the edges, the rest stays centred. Everything else is 3D, placed by Aurora from
+// its viewport.
+enum : int { WIDE_CENTRE, WIDE_LEFT, WIDE_RIGHT, WIDE_STRETCH, WIDE_3D, WIDE_COVER };
+std::set<float> s_backdropDepths[2];  // depths of backdrop tiles in the previous and this frame
+u32 s_zmode = 0;  // BP ZMODE (bit 0: depth test)
+u64 s_wideLogFrame = ~0ull, s_wideLogTo = 0;  // one frame, or 2D draws over a range of frames
+
+// The gameplay HUD (score, time, rings, lives, character gauges) is drawn by f_80061CBC, which the
+// stage display routine calls from 8001E768 - and, while paused, the paused one from 8001E180.
+// Only its sprites move to the screen edges; menus are laid out as one 4:3 composition (panels,
+// highlights and text in separate sprites) and stay centred, as on the PC version.
+constexpr u32 kHudReturns[] = {0x8001E76C, 0x8001E184};
+// The stage display routines (running and paused), seen from the code they call.
+constexpr u32 kStageDisplayReturns[] = {0x8001F740, 0x8001FC38};
+
+bool drawingHud(float minx, float maxx) {
+    const Ctx* c = sched::currentCtx();
+    if (!c) return false;
+    u32 sp = c->r[1], chain[12] = {};
+    int n = 0;
+    bool inStage = false;
+    for (; n < 12 && (sp >> 25) == 0x40; n++) {  // the back chain's LR save words
+        if (!(sp = rd32(sp))) break;
+        const u32 ret = chain[n] = rd32(sp + 4);
+        for (u32 r : kHudReturns)
+            if (ret == r) return true;
+        for (u32 r : kStageDisplayReturns) inStage = inStage || ret == r;
+    }
+    // Other 2D in a stage (trick ratings, prompts, boss gauges...) stays centred; each distinct
+    // drawing path is logged once, so the ones that belong at the edges can be found and added.
+    if (inStage && n >= 2) {
+        static std::set<u64> s_seen;
+        if (s_seen.size() < 64 && s_seen.insert(u64(chain[0]) << 32 | chain[1]).second)
+            log("[wide] in-stage 2D at x %.0f..%.0f drawn from %08X %08X %08X %08X\n", minx, maxx, chain[0], chain[1],
+                n > 2 ? chain[2] : 0, n > 3 ? chain[3] : 0);
+    }
+    return false;
+}
+
+bool ninja2DMatrix(u32 m) {
+    const float a = xff(m + 5);
+    if (a == 0.f || std::fabs(xff(m) + a) > 1e-4f * std::fabs(a) || xff(m + 10) != 1.f) return false;
+    for (u32 z : {1u, 3u, 4u, 7u, 8u, 9u, 11u})
+        if (xff(m + z) != 0.f) return false;
+    return std::fabs(xff(m + 2) - 320.f * a) <= 1e-3f * std::fabs(320.f * a) &&
+           std::fabs(xff(m + 6) + 240.f * a) <= 1e-3f * std::fabs(240.f * a);
+}
+
+void place2D(const u8* p, u32 count, u32 fmt) {
+    const u32 lo = s_vcdLo, a = s_vatA[fmt];
+    const u32 posType = (lo >> 9) & 3;
+    if (!posType) return;
+    const bool ortho = s_xf[0x1026] == 1;
+    u32 pre = 0;  // matrix index bytes before the position
+    for (u32 i = 0; i < 9; i++) pre += (lo >> i) & 1;
+    const u32 vsize = vertexSize(fmt);
+    const u32 comps = (a & 1) ? 3 : 2, cfmt = (a >> 1) & 7, shift = (a >> 4) & 31;
+    const float scale = 1.f / float(1u << shift);
+    auto comp = [&](const u8* q, u32 i) -> float {
+        switch (cfmt) {
+        case 0: return q[i] * scale;
+        case 1: return s8(q[i]) * scale;
+        case 2: return u16(q[i * 2] << 8 | q[i * 2 + 1]) * scale;
+        case 3: return s16(q[i * 2] << 8 | q[i * 2 + 1]) * scale;
+        default: return __builtin_bit_cast(float, u32(q[i * 4]) << 24 | u32(q[i * 4 + 1]) << 16 | u32(q[i * 4 + 2]) << 8 | q[i * 4 + 3]);
+        }
+    };
+    const float p0 = xff(0x1020), p1 = xff(0x1021), p2 = xff(0x1022), p3 = xff(0x1023);
+    const float sx = xff(0x101A), ox = xff(0x101D) - 342.f, sy = xff(0x101B), oy = xff(0x101E) - 342.f;
+    float minx = 1e9f, maxx = -1e9f, miny = 1e9f, maxy = -1e9f, minz = 1e9f, maxz = -1e9f;
+    bool ninja2D = true;
+    for (u32 v = 0; v < count && v < 256; v++) {
+        const u8* vp = p + v * vsize;
+        const u32 m = ((lo & 1) ? vp[0] : (s_cpMtxA & 0x3F)) * 4;  // matrix rows are 4 words
+        if (m + 11 >= 0x100) continue;
+        const u8* pos = vp + pre;
+        if (posType >= 2) {
+            const u32 idx = posType == 2 ? pos[0] : u32(pos[0]) << 8 | pos[1];
+            pos = hostp(0x80000000u | ((s_arrayBase[0] + idx * s_arrayStride[0]) & 0x01FFFFFF));
+        }
+        ninja2D = ninja2D && ninja2DMatrix(m);
+        const float x = comp(pos, 0), y = comp(pos, 1), z = comps == 3 ? comp(pos, 2) : 0.f;
+        const float ex = xff(m) * x + xff(m + 1) * y + xff(m + 2) * z + xff(m + 3);
+        const float ey = xff(m + 4) * x + xff(m + 5) * y + xff(m + 6) * z + xff(m + 7);
+        const float ez = xff(m + 8) * x + xff(m + 9) * y + xff(m + 10) * z + xff(m + 11);
+        float ndcX, ndcY;
+        if (ortho) ndcX = p0 * ex + p1, ndcY = p2 * ey + p3;
+        else if (ez < -1e-6f) ndcX = (p0 * ex + p1 * ez) / -ez, ndcY = (p2 * ey + p3 * ez) / -ez;
+        else continue;  // behind the eye
+        const float screenX = ndcX * sx + ox, screenY = ndcY * sy + oy;
+        minx = std::min(minx, screenX);
+        maxx = std::max(maxx, screenX);
+        miny = std::min(miny, screenY);
+        maxy = std::max(maxy, screenY);
+        minz = std::min(minz, ez);
+        maxz = std::max(maxz, ez);
+    }
+    int place = WIDE_3D;
+    if (minx <= maxx) {
+        const bool flat = maxz - minz <= 1e-3f * std::max(1.f, -minz);
+        const bool sprite = ortho || (flat && ninja2D);
+        const float w = maxx - minx, h = maxy - miny, cx = (minx + maxx) * 0.5f;
+        if (sprite) {
+            if (minx <= 16.f && maxx >= 624.f)  // full screen: art fills it, fades and screen effects stretch
+                place = (s_genMode & 0xF) && !s_copyDests.count(s_tex0) ? WIDE_COVER : WIDE_STRETCH;
+            // Backdrops: the farthest layers (sprite priority, as depth, 5000 or more). Nearer layers
+            // carry things placed on them (the stage select's map and its stage icons) and stay
+            // centred with the rest.
+            else if (minz <= -5000.f && h >= 120.f && minx >= -1.f && maxx <= 641.f && (minx <= 1.f || maxx >= 639.f)) {
+                place = WIDE_COVER;  // a tall piece against an edge: a tile of a backdrop
+                s_backdropDepths[1].insert(minz);
+            } else if (minz <= -5000.f && w >= 64.f && h >= 64.f && (s_backdropDepths[0].count(minz) || s_backdropDepths[1].count(minz)))
+                place = WIDE_COVER;  // a tile inside a backdrop: Ninja draws them all at one priority (depth)
+            else if (!drawingHud(minx, maxx)) place = WIDE_CENTRE;
+            else if (cx < 192.f) place = WIDE_LEFT;
+            else if (cx > 448.f) place = WIDE_RIGHT;
+            else place = WIDE_CENTRE;
+        }
+        if (s_frames == s_wideLogFrame || (s_frames >= s_wideLogFrame && s_frames <= s_wideLogTo && flat)) {
+            const u32 m = ((lo & 1) ? p[0] : (s_cpMtxA & 0x3F)) * 4;
+            std::string chain;  // the guest code drawing it: LR, then the back chain's LR save words
+            if (const Ctx* c = sched::currentCtx()) {
+                char b[16];
+                std::snprintf(b, sizeof b, " %08X", c->lr);
+                chain += b;
+                u32 sp = c->r[1];
+                for (int i = 0; i < 8 && (sp >> 25) == 0x40; i++) {
+                    if (!(sp = rd32(sp))) break;
+                    std::snprintf(b, sizeof b, " %08X", rd32(sp + 4));
+                    chain += b;
+                }
+            }
+            log("[wide] %llu %s draw: x %.0f..%.0f y %.0f..%.0f z %.2f..%.2f, %u verts, mtx %u [%.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g], zmode %x, tex %u%s -> %d; stack%s\n",
+                (unsigned long long)s_frames, ortho ? "ortho" : "persp", minx, maxx, miny, maxy, minz, maxz, count, m / 4,
+                xff(m), xff(m + 1), xff(m + 2), xff(m + 3), xff(m + 4), xff(m + 5), xff(m + 6), xff(m + 7), xff(m + 8),
+                xff(m + 9), xff(m + 10), xff(m + 11), s_zmode, s_genMode & 0xF, s_copyDests.count(s_tex0) ? " (copy)" : "", place,
+                chain.c_str());
+        }
+    }
+    if (place != s_last2D) {
+        aurora(AUR_WIDE_2D);
+        put8(u8(place));
+        s_last2D = place;
+    }
+}
+
 void translateBp(u32 v) {
     const u32 reg = v >> 24, val = v & 0xFFFFFF;
     int map;
+    if (reg == 0x00) s_genMode = val;
+    if (reg == 0x40) s_zmode = val;
+    if (texMapOf(reg, 0x14) == 0) s_tex0 = (val & 0xFFFFFF) << 5;
     if ((map = texMapOf(reg, 0x08)) >= 0) s_texImage0[map] = val;
     if ((map = texMapOf(reg, 0x04)) >= 0) s_texMode1[map] = val;
     if ((map = texMapOf(reg, 0x18)) >= 0) s_tlutRegion[map] = val;
@@ -342,8 +523,15 @@ void translateBp(u32 v) {
             put8(half ? 1 : 0);
             aurora(AUR_COPY_DEST);
             put64(hostAddr((s_copyDest & 0x1FFFFF) << 5));
+            s_copyDests.insert((s_copyDest & 0x1FFFFF) << 5);
+            // A small copy ends a render-to-texture pass: its segment keeps plain mapping.
+            const u32 w = (s_copySrcWH & 0x3FF) + 1, h = ((s_copySrcWH >> 10) & 0x3FF) + 1;
+            if ((w < 400 || h < 300) && s_segmentAt < s_out.size()) s_out[s_segmentAt] = 0;
         }
-        break;
+        put8(CMD_LOAD_BP);
+        put32(v);
+        beginSegment();
+        return;
     }
     default: break;
     }
@@ -357,6 +545,7 @@ void translateCp(u32 reg, u32 v) {
     else if (reg >= 0x70 && reg < 0x78) s_vatA[reg & 7] = v;
     else if (reg >= 0x80 && reg < 0x88) s_vatB[reg & 7] = v;
     else if (reg >= 0x90 && reg < 0x98) s_vatC[reg & 7] = v;
+    else if (reg == 0x30) s_cpMtxA = v;
     if (reg >= 0xA0 && reg < 0xB0) {  // array base: physical address, sent when a draw uses it
         s_arraysSet |= 1u << (reg & 0xF);
         s_arrayBase[reg & 0xF] = v;
@@ -396,6 +585,9 @@ size_t command(const u8* p, size_t n, int depth) {
         const u32 count = (be16(p + 1)) + 1;
         const size_t len = 5 + 4 * size_t(count);
         if (n < len) return 0;
+        const u32 addr = be16(p + 3);
+        for (u32 i = 0; i < count; i++)
+            if (addr + i < 0x1058) s_xf[addr + i] = be32(p + 5 + i * 4);
         putBytes(p, len);
         return len;
     }
@@ -404,6 +596,9 @@ size_t command(const u8* p, size_t n, int depth) {
         if (n < 5) return 0;
         const u32 array = 12 + (op - CMD_INDX_A) / 8;
         needArray(array, be16(p + 1) * s_arrayStride[array] + ((be16(p + 3) >> 12) + 1) * 4);
+        const u32 src = s_arrayBase[array] + be16(p + 1) * s_arrayStride[array], xa = be16(p + 3) & 0xFFF;
+        for (u32 i = 0; i <= (be16(p + 3) >> 12u); i++)
+            if (xa + i < 0x1058) s_xf[xa + i] = rd32(0x80000000u | ((src + i * 4) & 0x01FFFFFF));
         putBytes(p, 5);
         return 5;
     }
@@ -435,6 +630,7 @@ size_t command(const u8* p, size_t n, int depth) {
             const u32 minCount = prim == 0x80 || prim == 0x88 ? 4 : prim >= 0xA8 && prim < 0xB8 ? 2 : prim == 0xB8 ? 1 : 3;
             if (count < minCount) return len;
             sizeArrays(p + 3, be16(p + 1), op & 7);
+            place2D(p + 3, count, op & 7);
             putBytes(p, len);
             return len;
         }
@@ -470,6 +666,7 @@ std::condition_variable s_frameCv;
 std::vector<u8> s_ready;
 std::vector<std::unique_ptr<u8[]>> s_readySnapshots;
 bool s_haveReady = false;
+u32 s_readyFrames = 0;  // game frames in the pending (merged) frame
 }  // namespace
 
 void gxWrite(u32 v, int size) {
@@ -501,25 +698,50 @@ void gxEndFrame() {
         log("[gx] frame %llu: %zu bytes, %u display copies\n", (unsigned long long)s_frames, s_out.size(), s_displayCopies);
     s_displayCopies = 0;
     std::unique_lock lk(s_frameLock);
-    if (s_haveReady) {
-        // The render thread has not taken the previous frame yet: wait (at most a few refreshes)
-        // with the guest CPU released so interrupts and other threads keep going.
+    // The game never waits for the display: it runs at the console's 60 Hz whatever the monitor
+    // does (some of its timing follows the music clock, some the frame count; holding frames back
+    // pulled them apart in cutscenes). Only when the renderer has fallen several frames behind
+    // (a stall, a minimised window) is the game held, briefly, with the guest CPU released.
+    if (s_haveReady && s_readyFrames >= 4) {
         lk.unlock();
         sched::withCpuReleased([&] {
             std::unique_lock w(s_frameLock);
-            s_frameCv.wait_for(w, std::chrono::milliseconds(100), [] { return !s_haveReady; });
+            s_frameCv.wait_for(w, std::chrono::milliseconds(50), [] { return !s_haveReady; });
         });
         lk.lock();
     }
     // Never drop a frame's commands: they carry state (GXInit's registers, vertex formats...) later
     // frames rely on. A frame the renderer has not taken yet is extended instead.
-    if (s_haveReady) s_ready.insert(s_ready.end(), s_out.begin(), s_out.end());
-    else s_ready.swap(s_out);
+    if (s_haveReady) {
+        s_ready.insert(s_ready.end(), s_out.begin(), s_out.end());
+        s_readyFrames++;
+    } else {
+        s_ready.swap(s_out);
+        s_readyFrames = 1;
+    }
     s_out.clear();
     for (auto& chunk : s_arena.chunks) s_readySnapshots.push_back(std::move(chunk));
     s_arena = {};
     std::fill(std::begin(s_arraySent), std::end(s_arraySent), 0u);  // next frame snapshots afresh
     s_drawIndex = 0;
+    s_copyDests.clear();
+    s_backdropDepths[0].swap(s_backdropDepths[1]);
+    s_backdropDepths[1].clear();
+    beginSegment();  // the next frame starts drawing to the screen
+    // SA2_WIDE_LOG=<game frame> or r<module>:<frames after it linked>: log that frame's placements;
+    // <from>-<to>: those frames' flat draws (2D candidates).
+    if (const char* wl = std::getenv("SA2_WIDE_LOG")) {
+        if (wl[0] == 'r') {
+            const u32 mod = u32(std::atoi(wl + 1));
+            const char* c = std::strchr(wl, ':');
+            const u64 link = g_relLinkFrame[mod & 255].load();
+            if (link && c) s_wideLogFrame = link - 1 + std::strtoull(c + 1, nullptr, 10);
+            if (const char* d = c ? std::strchr(c, '-') : nullptr; link && d) s_wideLogTo = link - 1 + std::strtoull(d + 1, nullptr, 10);
+        } else {
+            s_wideLogFrame = std::strtoull(wl, nullptr, 10);
+            if (const char* d = std::strchr(wl, '-')) s_wideLogTo = std::strtoull(d + 1, nullptr, 10);
+        }
+    }
     s_haveReady = true;
     s_frameCv.notify_all();
 }

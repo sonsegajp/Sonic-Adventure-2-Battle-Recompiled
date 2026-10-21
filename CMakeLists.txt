@@ -17,32 +17,30 @@ target_link_libraries(sa2recompile PRIVATE sa2_recompiler)
 # ---- Aurora: GX renderer (WebGPU/Dawn), window, controllers (extern/aurora, MIT) ---------------
 # The disc is read by our own DVD layer and saves will go through our CARD layer, so Aurora's DVD
 # (nod) and CARD components are off.
-# Local changes to Aurora are kept as patches (patches/aurora) so the submodule stays pristine;
-# each is applied once (a reverse check tells an applied patch apart).
+# Local changes to Aurora are kept as patches (patches/aurora) so the submodule stays pristine.
+# The series is applied to a pristine checkout only; a checkout with changes is never touched (it
+# is the patched tree, perhaps with work not yet saved as a patch - a reset here once wiped that).
 file(GLOB AURORA_PATCHES ${CMAKE_SOURCE_DIR}/patches/aurora/*.patch)
 list(SORT AURORA_PATCHES)
-foreach (_patch ${AURORA_PATCHES})
-    execute_process(COMMAND git apply --reverse --check ${_patch}
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/extern/aurora RESULT_VARIABLE _applied OUTPUT_QUIET ERROR_QUIET)
-    if (NOT _applied EQUAL 0)
-        execute_process(COMMAND git apply ${_patch} WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/extern/aurora
-            RESULT_VARIABLE _result)
+set(_aurora ${CMAKE_SOURCE_DIR}/extern/aurora)
+execute_process(COMMAND git diff --quiet HEAD WORKING_DIRECTORY ${_aurora} RESULT_VARIABLE _dirty)
+if (_dirty EQUAL 0)
+    # Git for Windows' core.autocrlf=true checks the submodule out with CRLF and LF patches then
+    # fail: switch it off and rewrite the (pristine) files with LF first.
+    execute_process(COMMAND git config core.autocrlf false WORKING_DIRECTORY ${_aurora})
+    execute_process(COMMAND git rm -r -q --cached . WORKING_DIRECTORY ${_aurora} OUTPUT_QUIET ERROR_QUIET)
+    execute_process(COMMAND git reset -q --hard WORKING_DIRECTORY ${_aurora})
+    execute_process(COMMAND git checkout-index -f -a WORKING_DIRECTORY ${_aurora})
+    foreach (_patch ${AURORA_PATCHES})
+        execute_process(COMMAND git apply ${_patch} WORKING_DIRECTORY ${_aurora} RESULT_VARIABLE _result)
         if (NOT _result EQUAL 0)
-            # Git for Windows' core.autocrlf=true checks the submodule out with CRLF and LF patches
-            # then fail: switch it off, rewrite the files with LF, and try again.
-            set(_aurora ${CMAKE_SOURCE_DIR}/extern/aurora)
-            execute_process(COMMAND git config core.autocrlf false WORKING_DIRECTORY ${_aurora})
-            execute_process(COMMAND git rm -r -q --cached . WORKING_DIRECTORY ${_aurora} OUTPUT_QUIET ERROR_QUIET)
-            execute_process(COMMAND git reset -q --hard WORKING_DIRECTORY ${_aurora})
-            execute_process(COMMAND git checkout-index -f -a WORKING_DIRECTORY ${_aurora})
-            execute_process(COMMAND git apply ${_patch} WORKING_DIRECTORY ${_aurora} RESULT_VARIABLE _result)
-            if (NOT _result EQUAL 0)
-                message(FATAL_ERROR "Failed to apply Aurora patch ${_patch}")
-            endif ()
+            message(FATAL_ERROR "Failed to apply Aurora patch ${_patch}")
         endif ()
         message(STATUS "Applied Aurora patch ${_patch}")
-    endif ()
-endforeach ()
+    endforeach ()
+else ()
+    message(STATUS "Aurora has local changes: taken as the patched tree (patches/aurora), left as is")
+endif ()
 set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_CARD OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)

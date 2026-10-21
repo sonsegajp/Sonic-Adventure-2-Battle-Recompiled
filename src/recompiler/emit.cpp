@@ -1,5 +1,6 @@
 #include "recompiler/emit.h"
 
+#include <cctype>
 #include <cstdarg>
 #include <cstdio>
 #include <algorithm>
@@ -69,11 +70,16 @@ private:
         return fmt("(g_relBase[%u][%u] + 0x%Xu)", mod, relSecOf(a), a & 0xFFFFFF);
     }
     std::string callExpr(u32 mod, u32 a) const {
-        if (const ModuleInfo* ti = infoOf(mod); ti && ti->funcs.count(a)) return funcSymbol(*ti->mod, a) + "(c)";
+        const ModuleInfo* ti = infoOf(mod);
+        if (ti && ti->funcs.count(a)) return funcSymbol(*ti->mod, a) + "(c)";
+        // A direct branch to code no function starts at fails at run time ("no function starts
+        // there"): reported so every such target gets found.
+        if (ti) st_.unresolvedTargets[fmt("%s:%08X", ti->mod->name.c_str(), a)]++;
         return "c.call(" + realAddr(mod, a) + ")";
     }
     std::string retAddr() const { return realAddr(m_.id, pc_ + 4); }
-    bool inFunc(u32 a) const { return a >= f_.start && a < f_.end; }
+    u32 bodyStart() const { return f_.alias && f_.body ? f_.body : f_.start; }
+    bool inFunc(u32 a) const { return a >= bodyStart() && a < f_.end; }
 
     // ---- immediates (relocation aware) ----
     const Reloc* halfReloc() const { return m_.isDol() ? nullptr : m_.relocOf(pc_, true); }
@@ -169,16 +175,31 @@ private:
 
 std::string FuncEmitter::run() {
     std::vector<std::pair<size_t, u32>> marks;
-    for (u32 pc = f_.start; pc < f_.end; pc += 4) {
+    // An alias (an entry point inside another function, reached through a pointer) is that whole
+    // function entered at its own address: branches back into the part before it stay local.
+    if (bodyStart() != f_.start) {
+        labels_.insert(f_.start);
+        E(fmt("goto L_%08X;", f_.start));
+    }
+    for (u32 pc = bodyStart(); pc < f_.end; pc += 4) {
         pc_ = pc;
         marks.push_back({lines_.size(), pc});
         const u32 w = m_.word(pc);
+        // Patch point (config/<game>/patchpoints.txt): native mod code runs before the instruction,
+        // with the registers as the game has them, and may skip it.
+        const auto pp = m_.isDol() ? p_.patchPoints.find(pc) : p_.patchPoints.end();
+        const bool patched = pp != p_.patchPoints.end();
+        if (patched) {
+            E(fmt("if (PatchFn pp = g_patchPoints[%d]; pp && pp(c)) [[unlikely]] goto P_%08X;", pp->second, pc));
+            st_.patchPoints++;
+        }
         try {
             insn(w);
         } catch (const Unsupported& u) {
             E(fmt("c.unimplemented(0x%Xu, 0x%08Xu);  // ", pc, w) + u.what);
             st_.unsupported[u.what]++;
         }
+        if (patched) E(fmt("P_%08X:;", pc));
         st_.instructions++;
     }
     // Running off the end continues into the next function.
@@ -693,6 +714,8 @@ const char* kPrelude =
     "// Generated from the user's own disc by the SA2B recompiler. Never commit.\n"
     "#include \"runtime/ctx.h\"\n"
     "namespace rt {\nextern HleFn g_hooks[];\n}\n";
+// Declared only where used, so adding a patch point rebuilds just the files it touches.
+const char* kPatchDecl = "namespace rt {\nusing PatchFn = bool (*)(Ctx&);\nextern PatchFn g_patchPoints[];\n}\n";
 
 }  // namespace
 
@@ -725,16 +748,17 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
         u64 done = 0;
         for (int ch = 0; ch < dolChunks; ch++) {
             const u64 goal = total * u64(ch + 1) / u64(dolChunks);
-            std::string t = std::string(kPrelude) + "#include \"dol_funcs.h\"\nnamespace rt {\n";
+            std::string body;
             while (it != dol.funcs.end() && (done < goal || ch == dolChunks - 1)) {
                 done += (it->second.end - it->second.start) / 4 + 8;
-                t += emitFunction(p, dol, it->second, st, slotOf(dol, it->first));
+                body += emitFunction(p, dol, it->second, st, slotOf(dol, it->first));
                 ++it;
             }
-            t += "}\n";
+            std::string t = std::string(kPrelude) + (body.find("g_patchPoints") != std::string::npos ? kPatchDecl : "") +
+                            "#include \"dol_funcs.h\"\nnamespace rt {\n" + body + "}\n";
             files.push_back({fmt("dol_%02d.cpp", ch), std::move(t)});
         }
-        std::string t = std::string(kPrelude) + "#include \"dol_funcs.h\"\n#include \"runtime/modules.h\"\nnamespace rt {\n"
+        std::string t = std::string(kPrelude) + kPatchDecl + "#include \"dol_funcs.h\"\n#include \"runtime/modules.h\"\nnamespace rt {\n"
                         "extern const FuncEntry kDolFuncs[] = {\n";
         for (auto& [a, f] : dol.funcs) t += fmt("    {0x%08Xu, &", a) + funcSymbol(*dol.mod, a) + "},\n";
         t += "};\n";
@@ -755,8 +779,16 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
             t += fmt("    {\"%s\", 0x%08Xu, &%s_orig},\n", dol.funcs.at(a).name.c_str(), a, funcSymbol(*dol.mod, a).c_str());
         if (bySlot.empty()) t += "    {nullptr, 0, nullptr},\n";
         t += "};\n";
-        t += fmt("extern const u32 kHookCount = %zuu;\nHleFn g_hooks[%zu];\n}\n", bySlot.size(),
+        t += fmt("extern const u32 kHookCount = %zuu;\nHleFn g_hooks[%zu];\n", bySlot.size(),
                  bySlot.empty() ? size_t(1) : bySlot.size());
+        // Patch points in slot order: the runtime registers native mod code by address.
+        std::vector<u32> points(p.patchPoints.size());
+        for (auto& [a, sl] : p.patchPoints) points[size_t(sl)] = a;
+        t += "extern const u32 kPatchPointAddrs[] = {";
+        for (u32 a : points) t += fmt("0x%08Xu, ", a);
+        if (points.empty()) t += "0";
+        t += fmt("};\nextern const u32 kPatchPointCount = %zuu;\nPatchFn g_patchPoints[%zu];\n}\n", points.size(),
+                 points.empty() ? size_t(1) : points.size());
         files.push_back({"dol_table.cpp", std::move(t)});
     }
     // Each REL: its declarations, its code in chunks, and its function table.
@@ -767,12 +799,8 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
         const ModuleInfo& mi = p.info[i];
         const Module& m = *mi.mod;
         const std::string base = fmt("rel_%s", m.name.substr(0, m.name.find('.')).c_str());
-        std::string h = std::string("#pragma once\n") + kPrelude + "#include \"dol_funcs.h\"\nnamespace rt {\n";
-        for (auto& [a, f] : mi.funcs) h += funcDecl(m, a) + ";\n";
-        h += "}\n";
-        files.push_back({base + ".h", std::move(h)});
+        std::vector<OutputFile> chunks;
         auto it = mi.funcs.begin();
-        int part = 0;
         while (it != mi.funcs.end()) {
             std::string t = std::string(kPrelude) + "#include \"" + base + ".h\"\nnamespace rt {\n";
             size_t n = 0;
@@ -782,8 +810,29 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
                 ++it;
             }
             t += "}\n";
-            files.push_back({fmt("%s_%02d.cpp", base.c_str(), part++), std::move(t)});
+            chunks.push_back({fmt("%s_%02d.cpp", base.c_str(), int(chunks.size())), std::move(t)});
         }
+        // Declarations: its own functions, and those of other modules it calls directly (the Chao
+        // World modules call into ChaoMain, module 60), found in the code as m<id>_<address>(.
+        std::set<std::string> foreign;
+        const std::string own = fmt("m%u_", m.id);
+        for (const auto& ch : chunks)
+            for (size_t at = ch.text.find('m'); at != std::string::npos; at = ch.text.find('m', at + 1)) {
+                size_t e = at + 1;
+                while (e < ch.text.size() && std::isdigit(u8(ch.text[e]))) e++;
+                if (e == at + 1 || e + 10 > ch.text.size() || ch.text[e] != '_' || ch.text[e + 9] != '(') continue;
+                if (at > 0 && (std::isalnum(u8(ch.text[at - 1])) || ch.text[at - 1] == '_')) continue;
+                bool hex = true;
+                for (size_t k = e + 1; k < e + 9; k++) hex = hex && std::isxdigit(u8(ch.text[k]));
+                const std::string sym = ch.text.substr(at, e + 9 - at);
+                if (hex && sym.compare(0, own.size(), own) != 0) foreign.insert(sym);
+            }
+        std::string h = std::string("#pragma once\n") + kPrelude + "#include \"dol_funcs.h\"\nnamespace rt {\n";
+        for (auto& [a, f] : mi.funcs) h += funcDecl(m, a) + ";\n";
+        for (const auto& sym : foreign) h += "void " + sym + "(Ctx& c);\n";
+        h += "}\n";
+        files.push_back({base + ".h", std::move(h)});
+        for (auto& ch : chunks) files.push_back(std::move(ch));
         std::string t = std::string(kPrelude) + "#include \"" + base + ".h\"\n#include \"runtime/modules.h\"\nnamespace rt {\n";
         t += fmt("extern const FuncEntry k%sFuncs[] = {\n", base.c_str());
         for (auto& [a, f] : mi.funcs) t += fmt("    {0x%08Xu, &", a) + funcSymbol(m, a) + "},\n";

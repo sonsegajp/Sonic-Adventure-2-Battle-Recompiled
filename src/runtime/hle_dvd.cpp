@@ -6,6 +6,7 @@
 #include "runtime/sched.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace rt {
@@ -41,7 +43,14 @@ enum : u32 { ST_END = 0, ST_BUSY = 1, ST_CANCELED = 10 };
 struct Request {
     u32 block, addr, length, callback;
     u64 offset;
+    u64 seq;
 };
+// The latest request issued on each command block: a completion for an older one (the game
+// cancelled it and reused the block) must not finish the new request with the old data.
+std::mutex s_seqLock;
+std::unordered_map<u32, u64> s_blockSeq;
+u64 s_seq = 0;
+std::atomic<u32> s_inFlight{0};
 std::mutex s_qLock;
 std::condition_variable s_qCv;
 std::deque<Request> s_queue;
@@ -55,7 +64,12 @@ bool readRaw(u64 offset, void* dst, u32 len) {
 }
 
 void complete(const Request& r, s32 result) {
+    s_inFlight--;
     sched::postIrq([r, result](Ctx& c) {
+        {
+            std::lock_guard g(s_seqLock);
+            if (s_blockSeq[r.block] != r.seq) return;  // stale: cancelled or superseded
+        }
         if (rd32(r.block + CB_STATE) == ST_CANCELED) return;
         wr32(r.block + CB_STATE, result >= 0 ? ST_END : u32(-1));
         wr32(r.block + CB_TRANSFERRED, result >= 0 ? u32(result) : 0);
@@ -115,15 +129,29 @@ void submit(u32 block, u32 addr, u32 length, u64 offset, u32 callback, u32 comma
     wr32(block + CB_OFFSET, u32(offset));
     wr32(block + CB_TRANSFERRED, 0);
     wr32(block + CB_CALLBACK, callback);
+    u64 seq;
+    {
+        std::lock_guard g(s_seqLock);
+        seq = s_blockSeq[block] = ++s_seq;
+    }
+    s_inFlight++;
     std::lock_guard g(s_qLock);
     if (!s_workerStarted) {
         s_workerStarted = true;
         std::thread(worker).detach();
     }
-    s_queue.push_back({block, addr, length, callback, offset});
+    s_queue.push_back({block, addr, length, callback, offset, seq});
     s_qCv.notify_one();
 }
 }  // namespace
+
+// For stall reports: requests issued but not yet completed, and queued ones.
+std::string dvdPendingSummary() {
+    std::lock_guard g(s_qLock);
+    std::string out = "in flight " + std::to_string(s_inFlight.load()) + ", queued " + std::to_string(s_queue.size());
+    for (const Request& r : s_queue) out += "; " + fileAt(r.offset);
+    return out;
+}
 
 void dvdOpenDisc(const std::string& path) {
     s_disc = std::fopen(path.c_str(), "rb");
@@ -147,6 +175,32 @@ void dvdOpenDisc(const std::string& path) {
 // Path lookups and directory changes stay native; with SA2_DVD_LOG they are logged.
 HLE(DVDConvertPathToEntrynum) {
     static const bool s_log = std::getenv("SA2_DVD_LOG") != nullptr;
+    // Testing: SA2_STAGE=<level>[:<character>] - whichever stage the game loads (the attract demo's
+    // City Escape), stage <level> is loaded instead, with the level number (r13-0x7AA0) and both
+    // players' characters (r13-0x7A98, -0x7A94) set to match as the stage module is opened.
+    // Levels 60-67 are boss modules, 70/71 the kart races (the stage loader's own name table).
+    if (const char* st = std::getenv("SA2_STAGE")) {
+        const char* p = gstr(c.r[3]);
+        int n;
+        if (std::sscanf(p, "stg%2dD.rel", &n) == 1 && std::strlen(p) == 10) {
+            static const char* const kBoss[] = {"boss_bigfoot", "boss_hotshot", "boss_fdog", "boss_bigbogy",
+                                                "boss_golem",   "boss_last1",   "boss_last2", "boss_golemE"};
+            const int level = std::atoi(st);
+            const char* colon = std::strchr(st, ':');
+            const u32 chr = colon ? u32(std::atoi(colon + 1)) : 0;
+            char name[32];
+            if (level >= 60 && level <= 67) std::snprintf(name, sizeof name, "%sD.rel", kBoss[level - 60]);
+            else if (level == 70 || level == 71) std::snprintf(name, sizeof name, "CartD.rel");
+            else std::snprintf(name, sizeof name, "stg%02dD.rel", level);
+            static const u32 s_name = hleAlloc(32);
+            std::memcpy(hostp(s_name), name, std::strlen(name) + 1);
+            c.r[3] = s_name;
+            wr16(c.r[13] - 0x7AA0, u32(level));
+            wr32(c.r[13] - 0x7A98, chr);
+            wr32(c.r[13] - 0x7A94, chr);
+            log("[test] level %d (%s) with character %u instead of stage %d\n", level, name, chr, n);
+        }
+    }
     const std::string path = gstr(c.r[3]);
     callOriginal(c, "DVDConvertPathToEntrynum");
     if (s_log) log("[dvd] path '%s' -> entry %d\n", path.c_str(), s32(c.r[3]));
@@ -185,8 +239,14 @@ HLE(DVDReadDiskID) {  // (block, diskID, callback)
     submit(c.r[3], c.r[4], 0x20, 0, c.r[5], 5);
     c.r[3] = 1;
 }
+void invalidate(u32 block) {
+    std::lock_guard g(s_seqLock);
+    s_blockSeq[block] = ++s_seq;
+}
+
 HLE(DVDCancelAsync) {  // (block, callback)
     const u32 block = c.r[3], cb = c.r[4];
+    invalidate(block);
     wr32(block + CB_STATE, ST_CANCELED);
     if (cb) sched::postIrq([block, cb](Ctx& ic) {
         ic.r[3] = 0;
@@ -196,6 +256,7 @@ HLE(DVDCancelAsync) {  // (block, callback)
     c.r[3] = 1;
 }
 HLE(DVDCancel) {
+    invalidate(c.r[3]);
     wr32(c.r[3] + CB_STATE, ST_CANCELED);
     c.r[3] = 0;
 }

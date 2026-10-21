@@ -6,6 +6,7 @@
 // --frames N exits after N.
 #include "runtime/gx.h"
 #include "runtime/runtime.h"
+#include "runtime/sched.h"
 
 #include <aurora/aurora.h>
 #include <aurora/event.h>
@@ -15,9 +16,11 @@
 #include <dolphin/mtx.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
+#include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
 
 #include "gx/fifo.hpp"
+#include "window.hpp"
 #include "webgpu/gpu.hpp"
 
 #include <atomic>
@@ -30,6 +33,12 @@
 #include <thread>
 
 namespace rt {
+
+extern std::atomic<u64> g_relLinkFrame[256];  // src/runtime/dispatch.cpp
+extern std::atomic<bool> g_stopRequested;     // src/runtime/dispatch.cpp
+extern std::atomic<bool> g_relLinked[256];    // src/runtime/dispatch.cpp
+std::string dvdPendingSummary();                // src/runtime/hle_dvd.cpp
+void dumpAllThreads();                         // src/runtime/cpu.cpp
 
 namespace {
 std::mutex s_padLock;
@@ -44,29 +53,49 @@ void auroraLog(AuroraLogLevel level, const char* module, const char* message, un
 }
 
 // Scripted input for automated runs: SA2_PRESS="300:A,420:START,..." holds the buttons on port 1
-// for 8 frames from the given presented frame.
+// for 8 frames from the given presented frame; "r600:START" counts from the SA2_DUMP_REL module's
+// link (a stage) instead. SL/SR hold the stick left/right (steering).
 u64 s_frameNo = 0;
+constexpr u64 kRelPress = 1ull << 63;
+constexpr u16 kStickLeft = 0x4000, kStickRight = 0x8000;  // bits no PAD button uses
 u16 scriptedButtons() {
+    static const int s_rel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) & 255 : -1;
     static const std::vector<std::pair<u64, u16>> script = [] {
         std::vector<std::pair<u64, u16>> v;
         const char* s = std::getenv("SA2_PRESS");
         while (s && *s) {
-            const u64 frame = std::strtoull(s, const_cast<char**>(&s), 10);
+            const bool rel = *s == 'r';
+            if (rel) s++;
+            const u64 frame = std::strtoull(s, const_cast<char**>(&s), 10) | (rel ? kRelPress : 0);
             if (*s != ':') break;
             const char* name = ++s;
             while (*s && *s != ',') s++;
             const std::string b(name, size_t(s - name));
             const u16 mask = b == "A" ? PAD_BUTTON_A : b == "B" ? PAD_BUTTON_B : b == "X" ? PAD_BUTTON_X
                            : b == "Y" ? PAD_BUTTON_Y : b == "START" ? PAD_BUTTON_START : b == "UP" ? PAD_BUTTON_UP
-                           : b == "DOWN" ? PAD_BUTTON_DOWN : b == "LEFT" ? PAD_BUTTON_LEFT : b == "RIGHT" ? PAD_BUTTON_RIGHT : 0;
+                           : b == "DOWN" ? PAD_BUTTON_DOWN : b == "LEFT" ? PAD_BUTTON_LEFT : b == "RIGHT" ? PAD_BUTTON_RIGHT
+                           : b == "SL" ? kStickLeft : b == "SR" ? kStickRight : 0;
             v.push_back({frame, mask});
             if (*s == ',') s++;
         }
         return v;
     }();
     u16 held = 0;
-    for (auto& [f, m] : script)
+    for (auto [f, m] : script) {
+        if (f & kRelPress) {
+            const u64 link = s_rel >= 0 ? g_relLinkFrame[s_rel].load() : 0;
+            if (!link) continue;
+            f = (f & ~kRelPress) + link;
+        }
         if (s_frameNo >= f && s_frameNo < f + 8) held |= m;
+    }
+    // SA2_SKIP_EVENTS: while an event plays (eventD, module 80 linked), START is pressed every 120
+    // frames, as a player skips it (stage test runs).
+    static const bool s_skipEvents = std::getenv("SA2_SKIP_EVENTS") != nullptr;
+    if (s_skipEvents && g_relLinked[80]) {
+        const u64 link = g_relLinkFrame[80].load();
+        if (s_frameNo > link && (s_frameNo - link) % 120 >= 60 && (s_frameNo - link) % 120 < 68) held |= PAD_BUTTON_START;
+    }
     return held;
 }
 
@@ -74,7 +103,16 @@ void pollPads() {
     PADStatus st[4]{};
     PADRead(st);
     st[0].err = 0;  // port 1 is always connected: the keyboard stands in when there is no gamepad
-    st[0].button |= scriptedButtons();
+    const u16 scripted = scriptedButtons();
+    st[0].button |= scripted & ~(kStickLeft | kStickRight);
+    if (scripted & kStickLeft) st[0].stickX = -100;
+    if (scripted & kStickRight) st[0].stickX = 100;
+    // SA2_RUN (test runs): from 400 frames after the SA2_DUMP_REL module (a stage) linked, the stick
+    // is held forward, so the player travels through the stage.
+    static const bool s_run = std::getenv("SA2_RUN") != nullptr;
+    static const int s_runRel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) : -1;
+    if (s_run && s_runRel >= 0 && g_relLinked[s_runRel & 255] && s_frameNo > g_relLinkFrame[s_runRel & 255].load() + 400)
+        st[0].stickY = 100;
     std::lock_guard g(s_padLock);
     for (int i = 0; i < 4; i++) {
         u8* p = s_padGuest[i];
@@ -265,7 +303,6 @@ void collectFrameDump() {
 }  // namespace
 
 u64 viRetraces();  // src/runtime/hle_hw.cpp
-extern std::atomic<u64> g_relLinkFrame[256];  // src/runtime/dispatch.cpp
 
 void padSnapshot(u8 out[4][12]) {
     std::lock_guard g(s_padLock);
@@ -274,14 +311,32 @@ void padSnapshot(u8 out[4][12]) {
 
 int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*startGuest)()) {
     if (headless) _putenv("AURORA_HEADLESS=1");
+    // Widescreen (default): the window's aspect, with the 3D views widened and the HUD kept at its
+    // shape near the screen edges; --no-widescreen keeps the original 4:3 picture, pillarboxed.
+    // Presentation without vsync by default (Aurora then picks Mailbox: no tearing, no waiting): with
+    // vsync a present waits for the display's refresh, a frame that runs long backs the queue up,
+    // and the game, held once the renderer is 4 frames behind, falls under 60 - the intro's effects
+    // (frame-counted) then drift from its animation (music-timed). --vsync restores waiting.
+    bool widescreen = true, fullscreen = false, vsync = false;
+    u32 winW = 0, winH = 0;  // --window WxH
+    for (int i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--no-widescreen")) widescreen = false;
+        else if (!std::strcmp(argv[i], "--fullscreen")) fullscreen = true;
+        else if (!std::strcmp(argv[i], "--vsync")) vsync = true;
+        else if (!std::strcmp(argv[i], "--window") && i + 1 < argc) std::sscanf(argv[++i], "%ux%u", &winW, &winH);
+    }
+    if (!winW || !winH) winW = 1280, winH = widescreen ? 720 : 960;
     const AuroraConfig cfg{
         .appName = "SA2B Recompiled",
+        .vsync = vsync,
+        .startFullscreen = fullscreen,
+        .windowWidth = winW,
+        .windowHeight = winH,
         .logCallback = &auroraLog,
-        .vsync = true,
-        .windowWidth = 1280,
-        .windowHeight = 960,
     };
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
+    AuroraSetViewportPolicy(widescreen ? AURORA_VIEWPORT_STRETCH : AURORA_VIEWPORT_FIT);
+    AuroraSetWidescreen(widescreen);
     log("[frontend] Aurora up: backend %d, window %ux%u, framebuffer %ux%u\n", int(info.backend), info.windowSize.width,
         info.windowSize.height, info.windowSize.fb_width, info.windowSize.fb_height);
     // Aurora's own GX/VI state starts from its GXInit defaults and a 640x480 NTSC logical
@@ -324,6 +379,12 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
             if (ev->type == AURORA_EXIT) exiting = true;
         if (exiting) break;
         pollPads();
+        {  // F11: fullscreen on/off
+            static bool s_f11 = false, s_full = fullscreen;
+            const bool down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F11];
+            if (down && !s_f11) aurora::window::set_fullscreen(s_full = !s_full);
+            s_f11 = down;
+        }
         if (!gxTakeFrame(frame, snapshots, 16)) continue;  // keep the window responsive while the game loads
         static u64 s_taken = 0, s_refused = 0;
         if (++s_taken <= 3 || s_taken % 600 == 0)
@@ -406,6 +467,22 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         }
         aurora::gx::fifo::write_data(frame.data(), u32(frame.size()));
         presented++;
+        // Freeze evidence: the same command stream for 3 s (gameplay waiting on something) logs
+        // what the game threads and the disc are doing. Static menus trip it too, hence the cap.
+        {
+            static u64 s_lastHash = 0, s_same = 0;
+            static int s_reports = 0;
+            u64 h = 1469598103934665603ull ^ frame.size();
+            for (size_t i = 0; i < frame.size(); i += 61) h = (h ^ frame[i]) * 1099511628211ull;
+            s_same = h == s_lastHash ? s_same + 1 : 0;
+            s_lastHash = h;
+            if (s_same == 180 && s_reports++ < 6) {
+                log("[stall] frame %llu: the game has shown an identical frame for 3 s; disc: %s\n",
+                    (unsigned long long)presented, dvdPendingSummary().c_str());
+                dumpAllThreads();
+                sched::debugDump();
+            }
+        }
         s_frameNo = presented;
         if (const char* gxDump = std::getenv("SA2_GXDUMP_FRAME"); gxDump && presented == std::strtoull(gxDump, nullptr, 10)) {
             if (std::FILE* f = std::fopen("build/gxframe.bin", "wb")) {  // decode with tools/gxdump.py
@@ -448,6 +525,13 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
                 st->mergedDrawCallCount, st->createdPipelines);
         }
         if (maxFrames && presented >= maxFrames) break;
+        if (g_stopRequested) break;
+        // SA2_STOP_AFTER=N with SA2_DUMP_REL: exit N frames after that module linked (test runs).
+        static const u64 s_stopAfter = std::getenv("SA2_STOP_AFTER") ? std::strtoull(std::getenv("SA2_STOP_AFTER"), nullptr, 10) : 0;
+        if (s_stopAfter && s_dumpRel >= 0) {
+            const u64 link = g_relLinkFrame[s_dumpRel & 255].load();
+            if (link && presented >= link - 1 + s_stopAfter) break;
+        }
     }
     log("[frontend] exiting after %llu frames\n", (unsigned long long)presented);
     std::fflush(stdout);
