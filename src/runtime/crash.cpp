@@ -7,8 +7,10 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace rt {
 
@@ -40,7 +42,34 @@ LONG WINAPI onCrash(EXCEPTION_POINTERS* ep) {
 }
 }  // namespace
 
-void installCrashHandler() { SetUnhandledExceptionFilter(onCrash); }
+// abort() (also reached from std::terminate, e.g. an uncaught C++ exception) fast-fails past the
+// exception filter; report it the same way, with the host call stack as module+offset.
+static void onAbort(int) {
+    std::fprintf(stdout, "\nABORT on host thread %lu; host stack:\n", GetCurrentThreadId());
+    void* frames[48];
+    const USHORT n = CaptureStackBackTrace(1, 48, frames, nullptr);
+    for (USHORT i = 0; i < n; i++) {
+        HMODULE mod = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(frames[i]), &mod);
+        char name[MAX_PATH] = "?";
+        if (mod) GetModuleFileNameA(mod, name, MAX_PATH);
+        const char* base = std::strrchr(name, '\\');
+        std::fprintf(stdout, "  %s+%llX\n", base ? base + 1 : name,
+                     (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(mod)));
+    }
+    std::fflush(stdout);
+    dumpAllThreads();
+    sched::debugDump();
+    std::fflush(stdout);
+    std::_Exit(3);
+}
+
+void installCrashHandler() {
+    SetUnhandledExceptionFilter(onCrash);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+    std::signal(SIGABRT, onAbort);
+}
 
 // Debug watchpoint (SA2_WATCH=<guest address>): the host page holding it is made read-only and
 // the first write to it is reported with what the guest threads were doing, then allowed.

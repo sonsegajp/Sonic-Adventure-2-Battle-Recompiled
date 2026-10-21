@@ -14,6 +14,7 @@
 #include <dolphin/mtx.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
+#include <SDL3/SDL_scancode.h>
 
 #include "gx/fifo.hpp"
 #include "webgpu/gpu.hpp"
@@ -289,7 +290,22 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         VIConfigure(&GXNtsc480IntDf);
         aurora_end_frame();
     }
+    // Keyboard stand-in for port 1 (a gamepad, when connected, works alongside it):
+    // WASD stick, IJKL C-stick, Space A, Shift B, F X, C Y, Tab Z, Q/E L/R, Enter START, arrows D-pad.
+    static const PADDefaultKeyBindings s_keys = {
+        {{SDL_SCANCODE_SPACE, PAD_BUTTON_A},   {SDL_SCANCODE_LSHIFT, PAD_BUTTON_B},  {SDL_SCANCODE_F, PAD_BUTTON_X},
+         {SDL_SCANCODE_C, PAD_BUTTON_Y},       {SDL_SCANCODE_RETURN, PAD_BUTTON_START}, {SDL_SCANCODE_TAB, PAD_TRIGGER_Z},
+         {SDL_SCANCODE_Q, PAD_TRIGGER_L},      {SDL_SCANCODE_E, PAD_TRIGGER_R},     {SDL_SCANCODE_UP, PAD_BUTTON_UP},
+         {SDL_SCANCODE_DOWN, PAD_BUTTON_DOWN}, {SDL_SCANCODE_LEFT, PAD_BUTTON_LEFT}, {SDL_SCANCODE_RIGHT, PAD_BUTTON_RIGHT}},
+        {{SDL_SCANCODE_D, PAD_AXIS_LEFT_X_POS, 100},  {SDL_SCANCODE_A, PAD_AXIS_LEFT_X_NEG, 100},
+         {SDL_SCANCODE_W, PAD_AXIS_LEFT_Y_POS, 100},  {SDL_SCANCODE_S, PAD_AXIS_LEFT_Y_NEG, 100},
+         {SDL_SCANCODE_L, PAD_AXIS_RIGHT_X_POS, 100}, {SDL_SCANCODE_J, PAD_AXIS_RIGHT_X_NEG, 100},
+         {SDL_SCANCODE_I, PAD_AXIS_RIGHT_Y_POS, 100}, {SDL_SCANCODE_K, PAD_AXIS_RIGHT_Y_NEG, 100},
+         {SDL_SCANCODE_Q, PAD_AXIS_TRIGGER_L, 100},   {SDL_SCANCODE_E, PAD_AXIS_TRIGGER_R, 100}},
+    };
+    if (!PADSetDefaultKeyBindings(0, &s_keys)) log("[frontend] keyboard bindings rejected\n");
     PADInit();
+    PADSetKeyboardActive(0, TRUE);
     pollPads();
     log("[frontend] controllers ready; starting the game\n");
     std::thread(startGuest).detach();
@@ -402,17 +418,18 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         aurora_end_frame();
         if (presented % 300 == 0 || presented == 30) {
             static auto s_last = std::chrono::steady_clock::now();
-            static u64 s_lastFrames = 0, s_lastRetraces = 0;
+            static u64 s_lastFrames = 0, s_lastRetraces = 0, s_lastSubmits = 0;
             const auto now = std::chrono::steady_clock::now();
             const double secs = std::chrono::duration<double>(now - s_last).count();
-            const u64 retraces = viRetraces();
+            const u64 retraces = viRetraces(), submits = gxFrames();
             const double fps = secs > 0 ? double(presented - s_lastFrames) / secs : 0;
             const double hz = secs > 0 ? double(retraces - s_lastRetraces) / secs : 0;
-            s_last = now, s_lastFrames = presented, s_lastRetraces = retraces;
+            const double gameFps = secs > 0 ? double(submits - s_lastSubmits) / secs : 0;
+            s_last = now, s_lastFrames = presented, s_lastRetraces = retraces, s_lastSubmits = submits;
             const AuroraStats* st = aurora_get_stats();
-            log("[frontend] %llu frames, %.1f fps (VI %.1f Hz); %zu bytes GX; Aurora: %u draws (%u merged), %u pipelines\n",
-                (unsigned long long)presented, fps, hz, frame.size(), st->drawCallCount, st->mergedDrawCallCount,
-                st->createdPipelines);
+            log("[frontend] %llu frames, %.1f fps (game submits %.1f/s, VI %.1f Hz); %zu bytes GX; Aurora: %u draws (%u merged), %u pipelines\n",
+                (unsigned long long)presented, fps, gameFps, hz, frame.size(), st->drawCallCount,
+                st->mergedDrawCallCount, st->createdPipelines);
         }
         if (maxFrames && presented >= maxFrames) break;
     }

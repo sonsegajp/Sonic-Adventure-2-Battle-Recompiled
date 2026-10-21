@@ -15,6 +15,7 @@
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -98,6 +99,72 @@ u32 vertexSize(u32 fmt) {
 
 u32 s_arraysSet = 0;  // CP arrays whose base has been loaded (bit = array index)
 
+// ---- vertex/matrix arrays ----
+// The hardware has no array sizes, but Aurora copies each array a draw reads into a per-frame
+// storage buffer (8 MiB), so a base is sent only once a draw uses it, with the extent the draws
+// have reached so far; it is resent larger (doubling) when a later draw indexes further.
+u32 s_arrayBase[16], s_arrayStride[16], s_arraySent[16];
+
+void needArray(u32 i, u32 bytes) {
+    if (bytes <= s_arraySent[i]) return;
+    const u32 limit = kHostMemSize - (s_arrayBase[i] & 0x01FFFFFF);
+    const u32 size = std::min((std::max(bytes, s_arraySent[i] * 2) + 63) & ~63u, limit);
+    s_arraySent[i] = size;
+    aurora(u16(AUR_ARRAYBASE | i));
+    put64(hostAddr(s_arrayBase[i]));
+    put32(size);
+    put8(0);  // big-endian
+}
+
+// Reads the indices of a draw's vertices and makes sure every array they index is sent big enough.
+void sizeArrays(const u8* p, u32 count, u32 fmt) {
+    const u32 lo = s_vcdLo, hi = s_vcdHi, a = s_vatA[fmt], b = s_vatB[fmt], c = s_vatC[fmt];
+    struct Op {
+        u8 skip, idxSize, array, elem;
+    };
+    Op ops[24];
+    u32 nops = 0, mtx = 0;
+    for (u32 i = 0; i < 9; i++) mtx += (lo >> i) & 1;
+    if (mtx) ops[nops++] = {u8(mtx), 0, 0, 0};
+    auto attr = [&](u32 type, u32 array, u32 elem, u32 indices = 1) {
+        if (type == 1) ops[nops++] = {u8(elem), 0, 0, 0};
+        else if (type >= 2)
+            for (u32 k = 0; k < indices; k++) ops[nops++] = {0, u8(type == 2 ? 1 : 2), u8(array), u8(elem)};
+    };
+    attr((lo >> 9) & 3, 0, ((a & 1) ? 3 : 2) * kComp[(a >> 1) & 7]);
+    const bool nbt = (a >> 9) & 1, nbt3 = nbt && (a >> 31);
+    const u32 nrmType = (lo >> 11) & 3;
+    if (nrmType == 1) attr(1, 1, (nbt ? 9 : 3) * kComp[(a >> 10) & 7]);
+    else attr(nrmType, 1, (nbt && !nbt3 ? 9 : 3) * kComp[(a >> 10) & 7], nbt3 ? 3 : 1);
+    attr((lo >> 13) & 3, 2, kClr[(a >> 14) & 7]);
+    attr((lo >> 15) & 3, 3, kClr[(a >> 18) & 7]);
+    const u32 tex[8][2] = {{(a >> 21) & 1, (a >> 22) & 7}, {b & 1, (b >> 1) & 7},          {(b >> 9) & 1, (b >> 10) & 7},
+                           {(b >> 18) & 1, (b >> 19) & 7}, {(b >> 27) & 1, (b >> 28) & 7}, {(c >> 5) & 1, (c >> 6) & 7},
+                           {(c >> 14) & 1, (c >> 15) & 7}, {(c >> 23) & 1, (c >> 24) & 7}};
+    for (u32 i = 0; i < 8; i++) attr((hi >> (2 * i)) & 3, 4 + i, (tex[i][0] ? 2 : 1) * kComp[tex[i][1]]);
+
+    s32 maxIdx[12];
+    u32 elemOf[12] = {};
+    for (s32& m : maxIdx) m = -1;
+    for (u32 v = 0; v < count; v++) {
+        for (u32 k = 0; k < nops; k++) {
+            const Op& o = ops[k];
+            if (o.skip) {
+                p += o.skip;
+                continue;
+            }
+            const u32 idx = o.idxSize == 1 ? p[0] : u32(p[0]) << 8 | p[1];
+            p += o.idxSize;
+            // An all-ones position index makes the hardware skip the vertex; it reads nothing.
+            if (o.array == 0 && idx == (o.idxSize == 1 ? 0xFFu : 0xFFFFu)) continue;
+            if (s32(idx) > maxIdx[o.array]) maxIdx[o.array] = s32(idx);
+            elemOf[o.array] = o.elem;
+        }
+    }
+    for (u32 i = 0; i < 12; i++)
+        if (maxIdx[i] >= 0) needArray(i, u32(maxIdx[i]) * s_arrayStride[i] + elemOf[i]);
+}
+
 // Indexed attributes in the current vertex descriptor whose array was never given a base.
 u32 missingArrays() {
     u32 need = 0;
@@ -113,6 +180,7 @@ u32 s_texImage0[8], s_texMode1[8], s_tlutRegion[8];
 u32 s_tlutSrc = 0;
 u32 s_copySrcTL = 0, s_copySrcWH = 0, s_copyDest = 0, s_copyStride = 0;
 u64 s_frames = 0;
+u32 s_displayCopies = 0;  // display copies since the last frame handoff
 
 int texMapOf(u32 reg, u32 base) {  // maps 0-3 at base 0x80.., 4-7 at 0xA0..
     if (reg >= 0x80 + base && reg < 0x84 + base) return int(reg - 0x80 - base);
@@ -209,6 +277,7 @@ void translateBp(u32 v) {
         break;
     }
     case 0x52: {  // EFB copy
+        if ((val >> 14) & 1) s_displayCopies++;
         if (!((val >> 14) & 1)) {  // texture copy (display copies just present the EFB)
             aurora(AUR_COPY_SRC);
             put32(s_copySrcTL & 0x3FF);
@@ -239,13 +308,15 @@ void translateCp(u32 reg, u32 v) {
     else if (reg >= 0x70 && reg < 0x78) s_vatA[reg & 7] = v;
     else if (reg >= 0x80 && reg < 0x88) s_vatB[reg & 7] = v;
     else if (reg >= 0x90 && reg < 0x98) s_vatC[reg & 7] = v;
-    if (reg >= 0xA0 && reg < 0xB0) {  // array base: physical address
+    if (reg >= 0xA0 && reg < 0xB0) {  // array base: physical address, sent when a draw uses it
         s_arraysSet |= 1u << (reg & 0xF);
-        aurora(u16(AUR_ARRAYBASE | (reg & 0xF)));
-        put64(hostAddr(v));
-        put32(kMem1Size - (v & 0x01FFFFFF));
-        put8(0);  // big-endian
+        s_arrayBase[reg & 0xF] = v;
+        s_arraySent[reg & 0xF] = 0;
         return;
+    }
+    if (reg >= 0xB0 && reg < 0xC0) {  // array stride
+        s_arrayStride[reg & 0xF] = v & 0xFF;
+        s_arraySent[reg & 0xF] = 0;
     }
     put8(CMD_LOAD_CP);
     put8(reg);
@@ -279,10 +350,14 @@ size_t command(const u8* p, size_t n, int depth) {
         putBytes(p, len);
         return len;
     }
-    case CMD_INDX_A: case CMD_INDX_B: case CMD_INDX_C: case CMD_INDX_D:
+    case CMD_INDX_A: case CMD_INDX_B: case CMD_INDX_C: case CMD_INDX_D: {
+        // Indexed XF load: (index, length-1 << 12 | XF address) from arrays 12-15.
         if (n < 5) return 0;
+        const u32 array = 12 + (op - CMD_INDX_A) / 8;
+        needArray(array, be16(p + 1) * s_arrayStride[array] + ((be16(p + 3) >> 12) + 1) * 4);
         putBytes(p, 5);
         return 5;
+    }
     case CMD_CALL_DL: {
         if (n < 9) return 0;
         const u32 addr = be32(p + 1), size = be32(p + 5);
@@ -302,6 +377,7 @@ size_t command(const u8* p, size_t n, int depth) {
             }
             const size_t len = 3 + size_t(be16(p + 1)) * vertexSize(op & 7);
             if (n < len) return 0;
+            sizeArrays(p + 3, be16(p + 1), op & 7);
             putBytes(p, len);
             return len;
         }
@@ -363,6 +439,9 @@ void gxNoteCpRegister(u32 off, u32 v) {
 
 void gxEndFrame() {
     s_frames++;
+    if (s_out.size() > (2u << 20) || s_displayCopies > 1)
+        log("[gx] frame %llu: %zu bytes, %u display copies\n", (unsigned long long)s_frames, s_out.size(), s_displayCopies);
+    s_displayCopies = 0;
     std::unique_lock lk(s_frameLock);
     if (s_haveReady) {
         // The render thread has not taken the previous frame yet: wait (at most a few refreshes)
