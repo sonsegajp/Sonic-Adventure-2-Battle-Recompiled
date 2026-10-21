@@ -1,0 +1,12 @@
+# Hand-identified SA2B (GSNE8P) SDK functions the matcher could not name (address name library TU how).
+# Evidence is noted per line; tools/sdkmatch.py appends these to names.txt.
+800E5BF0 OSReport os OSError.c printf-style-banner-calls-from-OSInit
+800EBF98 OSCreateThread os OSThread.c writes-0xDEADBABE-stack-magic+OSInitContext
+800E8114 OSNotifyLink os OSLink.c blr-called-by-OSLink
+800E8118 OSNotifyUnlink os OSLink.c blr-called-by-OSUnlink
+800E8128 Relocate os OSLink.c called-3x-by-OSLink+DCFlush/ICInvalidate
+800E839C OSLink os OSLink.c calls-Relocate+OSNotifyLink
+800E85EC Undo os OSLink.c called-by-OSUnlink
+800E87F8 OSUnlink os OSLink.c calls-Undo+OSNotifyUnlink
+800E71B4 EXIInit os EXIBios.c called-by-OSInit-before-SIInit
+800F6320 __ARChecksize ar ar.c called-by-ARInit+stores-__AR_Size-at-r13-0x743C

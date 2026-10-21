@@ -1,0 +1,10 @@
+# Game data never enters the repo: the user's own disc is read at setup time.
+orig/
+*.iso
+*.rvz
+*.dol
+*.rel
+build/
+out/
+__pycache__/
+*.pyc
