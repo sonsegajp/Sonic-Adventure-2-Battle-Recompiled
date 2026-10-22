@@ -1,0 +1,2 @@
+# Patches for the Aurora submodule are applied with git apply: they must keep LF line endings.
+*.patch text eol=lf

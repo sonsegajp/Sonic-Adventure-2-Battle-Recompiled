@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -18,10 +19,35 @@ bool g_traceOn = false;
 
 // ---- logging ----
 static std::mutex s_logLock;
+static std::FILE* s_logFile = nullptr;  // logToFile: a copy of everything logged, each line timed
+
+void logToFile(const char* path) {
+    std::lock_guard g(s_logLock);
+    s_logFile = std::fopen(path, "w");
+}
 void vlog(const char* fmt, va_list ap) {
     std::lock_guard g(s_logLock);
+    va_list copy;
+    va_copy(copy, ap);
     std::vfprintf(stdout, fmt, ap);
     std::fflush(stdout);
+    if (s_logFile) {
+        static const auto s_start = std::chrono::steady_clock::now();
+        static bool s_lineStart = true;
+        char buf[2048];
+        std::vsnprintf(buf, sizeof buf, fmt, copy);
+        const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count();
+        for (const char* p = buf; *p;) {
+            if (s_lineStart) std::fprintf(s_logFile, "%02d:%06.3f ", int(t / 60), std::fmod(t, 60.0));
+            const char* nl = std::strchr(p, '\n');
+            const size_t n = nl ? size_t(nl - p + 1) : std::strlen(p);
+            std::fwrite(p, 1, n, s_logFile);
+            s_lineStart = nl != nullptr;
+            p += n;
+        }
+        std::fflush(s_logFile);
+    }
+    va_end(copy);
 }
 void log(const char* fmt, ...) {
     va_list ap;
@@ -91,6 +117,14 @@ void dumpAllThreads() {
         std::vfprintf(stdout, fmt, ap);
         va_end(ap);
         std::fprintf(stdout, "\n");
+        if (s_logFile) {
+            std::fprintf(s_logFile, "FATAL: ");
+            va_start(ap, fmt);
+            std::vfprintf(s_logFile, fmt, ap);
+            va_end(ap);
+            std::fprintf(s_logFile, "\n");
+            std::fflush(s_logFile);
+        }
         if (g_traceOn) dumpTrace();
         std::fflush(stdout);
     }
@@ -100,8 +134,12 @@ void dumpAllThreads() {
 // ---- time base ----
 static const auto s_t0 = std::chrono::steady_clock::now();
 u64 timebase() {
-    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - s_t0).count();
-    return u64(ns) * kTimebaseHz / 1000000000ull;
+    const u64 ns = u64(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - s_t0).count());
+    // Whole seconds and the rest apart: ns * 40.5 MHz overflows 64 bits after 455 s, and the guest's
+    // clock then jumped back to 0 - 7 min 35 s into every session the sound sequencer (an interrupt
+    // handler) saw a huge elapsed time and never caught up: the game froze with its last audio
+    // buffer looping (the "freeze with a loud beep").
+    return ns / 1000000000ull * kTimebaseHz + ns % 1000000000ull * kTimebaseHz / 1000000000ull;
 }
 u32 Ctx::timebaseLo() { return u32(timebase()); }
 u32 Ctx::timebaseHi() { return u32(timebase() >> 32); }

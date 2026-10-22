@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <string>
@@ -20,6 +21,7 @@
 #include <vector>
 
 namespace rt {
+u64 gxFrames();  // src/runtime/gx.cpp
 
 namespace {
 std::FILE* s_disc = nullptr;
@@ -81,8 +83,94 @@ void complete(const Request& r, s32 result) {
     });
 }
 
+// ---- the drive's timing ----
+// A GameCube disc spins at a constant 28.5 turns a second; data sits on a spiral from 24 mm out
+// to 38 mm at constant density, so a read streams at 2.1 MiB/s at the hub up to 3.3 MiB/s at the
+// rim. The drive reads whole 32 KiB ECC blocks; moving the head costs a seek (35 ms plus head
+// travel within a millimetre, 75 ms plus travel beyond) and then the wait for the block to come
+// round. While idle it keeps reading ahead up to 1 MiB past the last block it was asked for, and
+// what it already holds goes to memory at 32 MiB/s. (The figures are the hardware measurements
+// Dolphin's drive model uses, the reference this runtime is checked against.)
+const auto s_clock0 = std::chrono::steady_clock::now();
+double hostSeconds() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - s_clock0).count(); }
+bool fastDisc() {  // (asked once the command line has been read)
+    static const bool fast = std::getenv("SA2_FAST_DISC") != nullptr;
+    return fast;
+}
+
+struct Drive {
+    static constexpr u64 kBlock = 32 * 1024, kAhead = 1024 * 1024;
+    static constexpr double kInner = 0.024, kOuter = 0.038;
+    double busyUntil = 0;
+    // Read-ahead: blocks [aheadFrom, aheadTo) arrive between aheadT0 and aheadT1 (none if equal).
+    u64 aheadFrom = 0, aheadTo = 0;
+    double aheadT0 = 0, aheadT1 = 0;
+
+    static double radius(u64 off) {  // where an offset lies: area grows with r^2 (single-layer DVD density)
+        constexpr double layer = 0x118240000, rimOfDvd = 0.058;
+        return std::sqrt(double(off) / layer * (rimOfDvd * rimOfDvd - kInner * kInner) + kInner * kInner);
+    }
+    static double streamTime(u64 off, u64 len) {
+        const double r = std::min(radius(off + len / 2), kOuter);
+        const double speed = (2.1 + (r - kInner) / (kOuter - kInner) * (3.325 - 2.1)) * 1024 * 1024;
+        return double(len) / speed;
+    }
+    static double seekTime(u64 from, u64 to) {
+        const double d = std::fabs(radius(from) - radius(to));
+        return d < 0.001 ? 0.035 + d * 50 : 0.075 + d * 4.5;
+    }
+    static double turnWait(u64 off, double t) {  // until the block's angle comes under the head
+        const double target = std::fmod(radius(off) / 0.00000074, 1.0), now = std::fmod(t * 28.5, 1.0);
+        return std::fmod(target + 1.0 - now, 1.0) / 28.5;
+    }
+
+    // When a read of [off, off+len) issued at time t completes.
+    double read(u64 off, u64 len, double t) {
+        // What the read-ahead holds by now, and where the head is.
+        u64 heldFrom = 0, heldTo = 0, head = 0;
+        if (aheadT1 > aheadT0) {
+            heldFrom = aheadTo > kAhead ? aheadTo - kAhead : 0;
+            heldTo = t >= aheadT1 ? aheadTo
+                                  : aheadFrom + u64((t - aheadT0) / (aheadT1 - aheadT0) * double(aheadTo - aheadFrom)) / kBlock * kBlock;
+            head = heldTo;
+        }
+        u64 block = off / kBlock * kBlock;
+        if (block < heldFrom) heldFrom = heldTo = 0;  // reading behind the buffer drops it
+        const u64 first = block;
+        double done = t + 0.0006;  // the command itself
+        bool sought = false;
+        for (u64 pos = off, left = len; left;) {
+            const u64 chunk = std::min<u64>(left, (pos / kBlock + 1) * kBlock - pos);
+            if (block >= heldFrom && block < heldTo) {
+                done += double(chunk) / (32.0 * 1024 * 1024);
+            } else {
+                if (block != head) {
+                    sought = true;
+                    done += seekTime(head, block);
+                    done += turnWait(block, done);
+                } else {
+                    done += streamTime(block, kBlock);
+                }
+                head = block + kBlock;
+            }
+            pos += chunk, left -= chunk, block += kBlock;
+        }
+        // The drive goes on reading ahead from the last block (keeping it and the one before).
+        const u64 last = block - kBlock;
+        if (!(last - heldFrom <= 2 * kBlock && heldFrom != heldTo)) {
+            aheadFrom = last >= heldTo ? last : heldTo;
+            aheadTo = last + kAhead - 2 * kBlock;
+            if (sought) aheadTo = std::max(aheadTo, first + kAhead);
+            aheadT0 = done;
+            aheadT1 = done + streamTime(aheadFrom, aheadTo - aheadFrom);
+        }
+        return done;
+    }
+} s_drive;
+
 void worker() {
     profileRegisterThread();
+    log("[dvd] drive timing: %s\n", fastDisc() ? "fast (--fast-disc)" : "as the console's drive");
     std::vector<u8> buf;
     for (;;) {
         Request r;
@@ -94,8 +182,13 @@ void worker() {
         }
         buf.resize(r.length);
         const bool ok = readRaw(r.offset, buf.data(), r.length);
-        // A disc read takes time on the console; some code races its own callbacks otherwise.
-        std::this_thread::sleep_for(std::chrono::microseconds(500 + r.length / 16));
+        // A read takes as long as on the console's drive: the game's streams (music, the movie
+        // layers of cutscenes) start when their data arrives, and cutscenes are timed for that.
+        // --fast-disc (SA2_FAST_DISC): nearly instant instead.
+        const double start = std::max(hostSeconds(), s_drive.busyUntil);
+        const double done = fastDisc() ? start + 0.0005 + r.length / 16e6 : s_drive.read(r.offset, r.length, start);
+        s_drive.busyUntil = done;
+        sleepUntil(s_clock0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(done)), false);
         if (ok) std::memcpy(hostp(r.addr), buf.data(), r.length);
         complete(r, ok ? s32(r.length) : -1);
     }
@@ -121,7 +214,7 @@ std::string fileAt(u64 offset) {
 
 void submit(u32 block, u32 addr, u32 length, u64 offset, u32 callback, u32 command) {
     static const bool s_log = std::getenv("SA2_DVD_LOG") != nullptr;
-    if (s_log) log("[dvd] read %s (%u bytes) -> %08X\n", fileAt(offset).c_str(), length, addr);
+    if (s_log) log("[dvd] frame %llu: read %s (%u bytes) -> %08X\n", (unsigned long long)gxFrames(), fileAt(offset).c_str(), length, addr);
     wr32(block + CB_COMMAND, command);
     wr32(block + CB_STATE, ST_BUSY);
     wr32(block + CB_ADDR, addr);

@@ -1,9 +1,12 @@
 // Developer entry point (sa2b): load main.dol into guest memory, set up the boot block the IPL
 // would leave behind, and run the recompiled __start.
-//   sa2b --dol <main.dol> --iso <disc image> [--headless] [--mute] [--frames N] [--trace]
+//   sa2b --iso <disc image> [--dol <main.dol>] [--headless] [--mute] [--volume 0-100] [--frames N] [--trace]
+// (without --dol the program is read from the disc, as the console's apploader does)
+#include "runtime/interp.h"
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -19,7 +22,7 @@ void dumpAllThreads();                       // src/runtime/cpu.cpp
 void installCrashHandler();                  // src/runtime/crash.cpp
 void installWatch(u32 guest, u32 len);       // src/runtime/crash.cpp
 int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*startGuest)());  // frontend.cpp
-void audioInit(bool enabled);                // src/runtime/audio.cpp
+void audioInit(bool enabled, float volume);  // src/runtime/audio.cpp
 }
 
 using namespace rt;
@@ -29,6 +32,25 @@ static bool readFile(const std::string& p, std::vector<u8>& out) {
     if (!f) return false;
     out.assign(std::istreambuf_iterator<char>(f), {});
     return true;
+}
+
+// main.dol from the disc image: the header's 0x420 is where it starts; its size is where its last
+// section ends.
+static bool readDiscDol(const std::string& iso, std::vector<u8>& out) {
+    std::ifstream f(iso, std::ios::binary);
+    if (!f) return false;
+    auto be = [](const u8* p) { return u32(p[0]) << 24 | p[1] << 16 | p[2] << 8 | p[3]; };
+    u8 h[4], dh[0x100];
+    f.seekg(0x420);
+    if (!f.read(reinterpret_cast<char*>(h), 4)) return false;
+    const u32 at = be(h);
+    f.seekg(at);
+    if (!f.read(reinterpret_cast<char*>(dh), sizeof dh)) return false;
+    u32 size = 0x100;
+    for (int i = 0; i < 18; i++) size = std::max(size, be(dh + i * 4) + be(dh + 0x90 + i * 4));
+    out.resize(size);
+    f.seekg(at);
+    return bool(f.read(reinterpret_cast<char*>(out.data()), size));
 }
 
 // The boot block (OSBootInfo at 0x80000000 and friends) as the IPL leaves it for a retail disc.
@@ -50,11 +72,21 @@ static void setupLowMem(const std::vector<u8>& discHeader) {
     wr16(0x800030E6, 0x8003);      // device code: retail
 }
 
+namespace rt {
+void hostTimingInit();               // src/runtime/hosttime.cpp
+void logToFile(const char* path);    // src/runtime/cpu.cpp
+}
+
 int main(int argc, char** argv) {
-    std::string dolPath = "orig/main.dol", isoPath;
+    hostTimingInit();
+    std::string dolPath, isoPath;
     int watchSecs = 0;
     bool headless = false, mute = std::getenv("SA2_MUTE") != nullptr;
+    // Mods (mods/) load only when asked for (--mods, or SA2_MODS=<folder>): PC code mods are not
+    // all translated yet.
+    bool mods = std::getenv("SA2_MODS") != nullptr;
     u64 maxFrames = 0;
+    float volume = std::getenv("SA2_VOLUME") ? float(std::atof(std::getenv("SA2_VOLUME"))) / 100.f : 1.f;  // percent
     for (int i = 1; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--dol" && i + 1 < argc) dolPath = argv[++i];
@@ -63,13 +95,25 @@ int main(int argc, char** argv) {
         else if (a == "--watch" && i + 1 < argc) watchSecs = std::atoi(argv[++i]);
         else if (a == "--headless") headless = true;
         else if (a == "--mute") mute = true;
+        else if (a == "--volume" && i + 1 < argc) volume = float(std::atof(argv[++i])) / 100.f;
+        else if (a == "--mods") mods = true;
+        else if (a == "--fast-disc") _putenv("SA2_FAST_DISC=1");  // read by the drive model (hle_dvd.cpp)
         else if (a == "--frames" && i + 1 < argc) maxFrames = std::strtoull(argv[++i], nullptr, 10);
     }
+    // Played sessions keep their log (sa2b.log, replaced at each start); test runs (headless) capture
+    // the console instead and leave it alone.
+    if (!headless) logToFile("sa2b.log");
     installCrashHandler();
-    audioInit(!headless && !mute);  // headless runs are always silent
+    audioInit(!headless && !mute, volume);  // headless runs are always silent
     if (!memInit()) return std::fprintf(stderr, "out of memory\n"), 1;
     std::vector<u8> dol;
-    if (!readFile(dolPath, dol)) return std::fprintf(stderr, "can't read %s\n", dolPath.c_str()), 1;
+    if (dolPath.empty() && !isoPath.empty()) {
+        if (!readDiscDol(isoPath, dol)) return std::fprintf(stderr, "can't read the program from %s\n", isoPath.c_str()), 1;
+        dolPath = "main.dol (disc)";
+    } else {
+        if (dolPath.empty()) dolPath = "orig/main.dol";
+        if (!readFile(dolPath, dol)) return std::fprintf(stderr, "can't read %s\n", dolPath.c_str()), 1;
+    }
     u32 entry = 0;
     if (!loadDol(dol, entry)) return std::fprintf(stderr, "bad DOL %s\n", dolPath.c_str()), 1;
     std::vector<u8> header(0x20, 0);
@@ -83,7 +127,9 @@ int main(int argc, char** argv) {
     if (!isoPath.empty()) dvdOpenDisc(isoPath);  // also places the FST and records it in the boot block
     registerDol();
     resolveHooks();
-    modsInit();
+    if (mods) modsInit();
+    interpInit();
+    gameFixesInit();
     if (const char* w = std::getenv("SA2_WATCH")) {  // SA2_WATCH=<hex address>[:<length>]
         const char* colon = std::strchr(w, ':');
         installWatch(u32(std::strtoul(w, nullptr, 16)), colon ? u32(std::strtoul(colon + 1, nullptr, 0)) : 4);

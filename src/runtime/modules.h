@@ -9,6 +9,7 @@ namespace rt {
 struct FuncEntry {
     u32 addr;
     GuestFn fn;
+    u32 body, end;  // the code it runs: [body, end) (body is before addr for an alias entry point)
 };
 
 struct NameEntry {
@@ -27,6 +28,7 @@ struct RelModuleCode {
     const char* file;
     const FuncEntry* funcs;
     u32 count;
+    u32 slotBase;  // its functions' override slots: slotBase + index (main.dol's: the index)
 };
 
 extern const FuncEntry kDolFuncs[];
@@ -38,5 +40,10 @@ extern const u32 kHookCount;
 extern HleFn g_hooks[];
 extern const RelModuleCode kRelModules[];
 extern const u32 kRelModuleCount;
+// Run-time replacement of any function: when g_fnOverride[slot] is set, the function calls
+// runOverride instead of running its translated body (src/runtime/interp.cpp).
+extern const u32 kFnSlotCount;
+extern u8 g_fnOverride[];
+void runOverride(Ctx& c, u32 slot);
 
 }  // namespace rt

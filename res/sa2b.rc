@@ -1,0 +1,2 @@
+// The programs' icon (tools/launcher/mkicon.py draws it); id 1 is what SDL uses for the window.
+1 ICON "sa2b.ico"

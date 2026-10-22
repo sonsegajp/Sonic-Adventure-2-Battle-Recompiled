@@ -1,67 +1,8 @@
-# Patch points: main.dol addresses where native mod code (src/runtime/mods.cpp) runs before the
-# instruction, with the game's registers, and may skip it. Regenerate after editing:
+# Patch points: main.dol addresses where native code runs before the instruction, with the game's
+# registers, and may skip it (the handler is a bool(Ctx&) registered in g_patchPoints by address).
+# Regenerate after editing:
 #   sa2recompile --dol orig/main.dol --rels orig/rel --names config/GSNE8P/names.txt
 #                --patches config/GSNE8P/patchpoints.txt --out build/gen
-
-# ---- HedgePanel (SPEEPSHighway): ported from the PC mod's patches to their GameCube code ----
-# No Low Enemy Bounces: enemy bounce counter (+0x35E) updated, before its compare's branch
-80081130
-# Bounce From Light Attack: light attack end - action, animation, field read
-8007F5EC
-8007F5F8
-8007F60C
-# Randomized Homing Sounds: the homing attack voice (Shadow 0x3009, Sonic 0x301B), three copies each
-80080294
-800805B4
-8008087C
-800802B8
-800805D8
-800808A0
-# Homing Attack At Low Heights: the 8-unit height difference test, three copies
-800801E8
-80080508
-800807D0
-# Fast Somersault: somersault speed stores (+0x64) - 1.875 (+0x35D 0x40), fast start, 3.125, 0.0, +0xE8 floor
-80077B2C
-80077E18
-800780F8
-800783C0
-80078638
-80078808
-80078A9C
-80077F5C
-800779E8
-80077CC8
-80077FB4
-8007827C
-800786F8
-80077BE8
-80077ED4
-800781E4
-800784AC
-80078670
-80078840
-# Fast Somersault slide animation (0x60 -> 0x5D)
-80078A6C
-# Modern Style Grinding: lean timer fall-off test, lean animation stores, lean reset test
-8007F9BC
-800754A0
-800754B4
-800754C8
-800754DC
-8007557C
-80075590
-800755A4
-800755B8
-80075320
-# Automatic Magic Hands Prompt: the action prompt update's exit; the catch action (0x15 -> 0x19)
-80010CA8
-800796E4
-8007A238
-80095F10
-8009648C
-# No Magic Orbs While Running: after a Magic Hands catch
-8007973C
-8007A290
-80095F64
-800964E4
+#
+# None at the moment: PC code mods are not ported but run as they are, translated by the mod host
+# (src/modhost, config/GSNE8P/pcmap.txt) - which needs no regeneration for new places.

@@ -689,7 +689,7 @@ void FuncEmitter::op4(u32 w) {
 
 std::string funcDecl(const Module& m, u32 a) { return "void " + funcSymbol(m, a) + "(Ctx& c)"; }
 
-std::string emitFunction(const Program& p, const ModuleInfo& mi, const Func& f, EmitStats& st, int hookSlot) {
+std::string emitFunction(const Program& p, const ModuleInfo& mi, const Func& f, EmitStats& st, int hookSlot, u32 fnSlot) {
     std::string out;
     out += "// " + (f.name.empty() ? std::string() : f.name + " ") +
            fmt("%s 0x%08X-0x%08X%s\n", mi.mod->name.c_str(), f.start, f.end, f.alias ? " (alias)" : "");
@@ -705,6 +705,9 @@ std::string emitFunction(const Program& p, const ModuleInfo& mi, const Func& f, 
         out += "    " + sym + "_orig(c);\n}\n";
         out += "void " + sym + "_orig(Ctx& c) {\n";
     }
+    // Every function can be replaced at run time (the mod host runs patched functions in the
+    // interpreter): its override flag is checked first.
+    out += fmt("    if (g_fnOverride[%u]) [[unlikely]] {\n        runOverride(c, %uu);\n        return;\n    }\n", fnSlot, fnSlot);
     out += FuncEmitter(p, mi, f, st).run();
     out += "}\n";
     return out;
@@ -713,7 +716,7 @@ std::string emitFunction(const Program& p, const ModuleInfo& mi, const Func& f, 
 const char* kPrelude =
     "// Generated from the user's own disc by the SA2B recompiler. Never commit.\n"
     "#include \"runtime/ctx.h\"\n"
-    "namespace rt {\nextern HleFn g_hooks[];\n}\n";
+    "namespace rt {\nextern HleFn g_hooks[];\nextern u8 g_fnOverride[];\nvoid runOverride(Ctx& c, u32 slot);\n}\n";
 // Declared only where used, so adding a patch point rebuilds just the files it touches.
 const char* kPatchDecl = "namespace rt {\nusing PatchFn = bool (*)(Ctx&);\nextern PatchFn g_patchPoints[];\n}\n";
 
@@ -746,12 +749,13 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
         for (auto& [a, f] : dol.funcs) total += (f.end - f.start) / 4 + 8;
         auto it = dol.funcs.begin();
         u64 done = 0;
+        u32 fnSlot = 0;
         for (int ch = 0; ch < dolChunks; ch++) {
             const u64 goal = total * u64(ch + 1) / u64(dolChunks);
             std::string body;
             while (it != dol.funcs.end() && (done < goal || ch == dolChunks - 1)) {
                 done += (it->second.end - it->second.start) / 4 + 8;
-                body += emitFunction(p, dol, it->second, st, slotOf(dol, it->first));
+                body += emitFunction(p, dol, it->second, st, slotOf(dol, it->first), fnSlot++);
                 ++it;
             }
             std::string t = std::string(kPrelude) + (body.find("g_patchPoints") != std::string::npos ? kPatchDecl : "") +
@@ -760,7 +764,8 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
         }
         std::string t = std::string(kPrelude) + kPatchDecl + "#include \"dol_funcs.h\"\n#include \"runtime/modules.h\"\nnamespace rt {\n"
                         "extern const FuncEntry kDolFuncs[] = {\n";
-        for (auto& [a, f] : dol.funcs) t += fmt("    {0x%08Xu, &", a) + funcSymbol(*dol.mod, a) + "},\n";
+        for (auto& [a, f] : dol.funcs)
+            t += fmt("    {0x%08Xu, &", a) + funcSymbol(*dol.mod, a) + fmt(", 0x%08Xu, 0x%08Xu},\n", f.alias && f.body ? f.body : f.start, f.end);
         t += "};\n";
         t += fmt("extern const u32 kDolFuncCount = %zuu;\n", dol.funcs.size());
         t += "extern const NameEntry kDolNames[] = {\n";
@@ -795,18 +800,20 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
     std::string index = std::string(kPrelude) + "#include \"runtime/modules.h\"\nnamespace rt {\n";
     std::string indexList = "extern const RelModuleCode kRelModules[] = {\n";
     size_t nrel = 0;
+    u32 slotBase = u32(dol.funcs.size());
     for (size_t i = 1; i < p.info.size(); i++) {
         const ModuleInfo& mi = p.info[i];
         const Module& m = *mi.mod;
         const std::string base = fmt("rel_%s", m.name.substr(0, m.name.find('.')).c_str());
         std::vector<OutputFile> chunks;
         auto it = mi.funcs.begin();
+        u32 fnSlot = slotBase;
         while (it != mi.funcs.end()) {
             std::string t = std::string(kPrelude) + "#include \"" + base + ".h\"\nnamespace rt {\n";
             size_t n = 0;
             while (it != mi.funcs.end() && (n < relChunkInsns || n == 0)) {
                 n += (it->second.end - it->second.start) / 4;
-                t += emitFunction(p, mi, it->second, st, -1);
+                t += emitFunction(p, mi, it->second, st, -1, fnSlot++);
                 ++it;
             }
             t += "}\n";
@@ -835,15 +842,18 @@ std::vector<OutputFile> emitProgram(const Program& p, EmitStats& st, int dolChun
         for (auto& ch : chunks) files.push_back(std::move(ch));
         std::string t = std::string(kPrelude) + "#include \"" + base + ".h\"\n#include \"runtime/modules.h\"\nnamespace rt {\n";
         t += fmt("extern const FuncEntry k%sFuncs[] = {\n", base.c_str());
-        for (auto& [a, f] : mi.funcs) t += fmt("    {0x%08Xu, &", a) + funcSymbol(m, a) + "},\n";
+        for (auto& [a, f] : mi.funcs)
+            t += fmt("    {0x%08Xu, &", a) + funcSymbol(m, a) + fmt(", 0x%08Xu, 0x%08Xu},\n", f.alias && f.body ? f.body : f.start, f.end);
         t += "};\n}\n";
         files.push_back({base + "_table.cpp", std::move(t)});
         index += fmt("extern const FuncEntry k%sFuncs[];\n", base.c_str());
-        indexList += fmt("    {%uu, \"%s\", k%sFuncs, %zuu},\n", m.id, m.name.c_str(), base.c_str(), mi.funcs.size());
+        indexList += fmt("    {%uu, \"%s\", k%sFuncs, %zuu, %uu},\n", m.id, m.name.c_str(), base.c_str(), mi.funcs.size(), slotBase);
+        slotBase += u32(mi.funcs.size());
         nrel++;
     }
     indexList += "};\n";
-    index += indexList + fmt("extern const u32 kRelModuleCount = %zuu;\n}\n", nrel);
+    index += indexList + fmt("extern const u32 kRelModuleCount = %zuu;\n", nrel);
+    index += fmt("extern const u32 kFnSlotCount = %uu;\nu8 g_fnOverride[%u];\n}\n", slotBase, slotBase);
     files.push_back({"rel_index.cpp", std::move(index)});
     return files;
 }

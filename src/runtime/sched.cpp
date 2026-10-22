@@ -1,5 +1,6 @@
 #include "runtime/sched.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -422,7 +423,9 @@ void timerMain() {
         const u64 now = timebase();
         auto it = g_alarms.begin();
         if (it->first > now) {
-            const u64 waitNs = (it->first - now) * 1000000000ull / kTimebaseHz;
+            // (at most a second at a time: ticks * 1e9 overflowed for alarms over 455 s away)
+            const u64 ticks = std::min<u64>(it->first - now, kTimebaseHz);
+            const u64 waitNs = ticks * 1000000000ull / kTimebaseHz;
             g_acv.wait_for(lk, std::chrono::nanoseconds(waitNs));
             continue;
         }

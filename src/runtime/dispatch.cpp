@@ -1,11 +1,14 @@
 // Indirect calls: guest code address -> native function, in O(1). Two-level table over the
 // physical address (cached/uncached mirrors resolve alike); pages are allocated on demand.
+#include "runtime/interp.h"
 #include "runtime/modules.h"
 #include "runtime/gx.h"
 #include "runtime/runtime.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
 
 namespace rt {
 
@@ -56,18 +59,35 @@ void registerRelModule(u32 id) {
         const u32 a = m->funcs[i].addr;
         dispatchRegister(g_relBase[id][a >> 24] + (a & 0xFFFFFF), m->funcs[i].fn);
     }
-    log("[rel] linked module %u (%s): %u functions, text at %08X\n", id, m->file, m->count, g_relBase[id][1]);
+    struct Later {  // after the module counts as linked (below)
+        u32 id;
+        ~Later() {
+            if (g_relLinkHook) g_relLinkHook(id, true);
+        }
+    } later{id};
+    std::string secs;  // every placed section: index@address
+    for (u32 s = 0; s < 20; s++)
+        if (g_relBase[id][s]) {
+            char b[24];
+            std::snprintf(b, sizeof b, " %u@%08X", s, g_relBase[id][s]);
+            secs += b;
+        }
+    log("[rel] linked module %u (%s): %u functions at frame %llu, sections%s\n", id, m->file, m->count,
+        (unsigned long long)gxFrames(), secs.c_str());
     g_relLinkFrame[id & 255] = gxFrames() + 1;
     g_relLinked[id & 255] = true;
+    gameFixesLinked(id);
 }
 
 void unregisterRelModule(u32 id) {
+    gameFixesUnlinked(id);
     // Like the console, an unlinked module's code stays callable at its old addresses until
     // something else is linked there (the game calls into a module after OSUnlink, e.g. eventD's
     // callbacks); a module linked later at the same addresses simply overwrites these entries.
     const RelModuleCode* m = relCode(id);
     if (m) log("[rel] unlinked module %u (%s)\n", id, m->file);
     g_relLinked[id & 255] = false;
+    if (g_relLinkHook) g_relLinkHook(id, false);
     // Test runs: SA2_STOP_ON_UNLINK=<id> ends the run when that module goes (e.g. an event ended).
     if (const char* s = std::getenv("SA2_STOP_ON_UNLINK"); s && u32(std::atoi(s)) == id) g_stopRequested = true;
     extern std::atomic<int> g_traceBurst;
@@ -76,6 +96,14 @@ void unregisterRelModule(u32 id) {
 
 void Ctx::call(u32 addr) {
     if (GuestFn fn = dispatchLookup(addr)) [[likely]] {
+        // The task system calling a task's function (it names it in kTaskFnVar first): what the
+        // task draws is tagged with it (src/runtime/gx.cpp), for in-between frames.
+        if (addr == rd32(kTaskFnVar)) {
+            gxTaskEnter(r[3], addr);
+            fn(*this);
+            gxTaskLeave();
+            return;
+        }
         fn(*this);
         return;
     }

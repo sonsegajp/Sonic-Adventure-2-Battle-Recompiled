@@ -19,13 +19,16 @@ std::atomic<u8> s_seen[0x10000 / 4];
 
 void noteFirst(u32 a, bool write, u32 v) {
     const u8 bit = write ? 2 : 1;
-    if (s_seen[(a & 0xFFFF) / 4].fetch_or(bit, std::memory_order_relaxed) & bit) return;
+    std::atomic<u8>& seen = s_seen[(a & 0xFFFF) / 4];
+    if (seen.load(std::memory_order_relaxed) & bit) return;  // (a plain read: polled registers stay cheap)
+    if (seen.fetch_or(bit, std::memory_order_relaxed) & bit) return;
     if (write) log("[mmio] first write %08X = %08X\n", a, v);
     else log("[mmio] first read  %08X\n", a);
 }
 }  // namespace
 
 u32 mmioGet16(u32 off) { return u32(s_regs[off & 0xFFFF]) << 8 | s_regs[(off + 1) & 0xFFFF]; }
+u32 mmioGet32(u32 off) { return mmioGet16(off) << 16 | mmioGet16(off + 2); }
 void mmioSet16(u32 off, u32 v) {
     s_regs[off & 0xFFFF] = u8(v >> 8);
     s_regs[(off + 1) & 0xFFFF] = u8(v);
@@ -45,6 +48,13 @@ u32 mmio_rd(u32 a, int size) {
         return dspRead16(o & ~1u);
     }
     noteFirst(a & ~3u, false, 0);
+    // PI interrupt cause (0xCC003000) bit 16 is the console's reset switch, 1 while it is up. Read as
+    // stored it was 0 - "held down" - and the game's soft-reset check (f_80022BC4, via
+    // OSGetResetButtonState) saw it let go now and then and returned to the title screen.
+    if ((o & ~3u) == 0x3000) {
+        const u32 v = (u32(s_regs[0x3000]) << 24 | u32(s_regs[0x3001]) << 16 | u32(s_regs[0x3002]) << 8 | s_regs[0x3003]) | 0x10000u;
+        return size == 4 ? v : size == 2 ? (v >> (16 - 8 * (o & 2))) & 0xFFFF : (v >> (24 - 8 * (o & 3))) & 0xFF;
+    }
     switch (size) {
     case 1: return s_regs[o];
     case 2: return u32(s_regs[o]) << 8 | s_regs[(o + 1) & 0xFFFF];

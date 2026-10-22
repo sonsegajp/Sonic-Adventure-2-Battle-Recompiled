@@ -45,14 +45,35 @@ set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_CARD OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 
+# ---- Launcher: disc, settings, HD textures, mods; drawn with the game's menu art from the disc ----
+# The programs' icon, on Windows: Sonic's lives icon from the disc when tools/launcher/mkicon.py
+# --disc has made it (build/icon, never committed), else our own (res/sa2b.ico).
+set(SA2_ICON_RC "")
+if (WIN32)
+    if (EXISTS ${CMAKE_SOURCE_DIR}/build/icon/sa2b.rc)
+        set(SA2_ICON_RC ${CMAKE_SOURCE_DIR}/build/icon/sa2b.rc)
+    else ()
+        set(SA2_ICON_RC ${CMAKE_SOURCE_DIR}/res/sa2b.rc)
+    endif ()
+endif ()
+add_executable(sa2b_launcher WIN32 src/launcher/main.cpp src/launcher/disc.cpp ${SA2_ICON_RC})
+set_target_properties(sa2b_launcher PROPERTIES OUTPUT_NAME "SA2BLauncher")
+target_include_directories(sa2b_launcher PRIVATE src)
+target_link_libraries(sa2b_launcher PRIVATE ${AURORA_SDL3_TARGET})
+if (WIN32)
+    add_custom_command(TARGET sa2b_launcher POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b_launcher> $<TARGET_FILE_DIR:sa2b_launcher>
+        COMMAND_EXPAND_LISTS)
+endif ()
+
 # ---- Developer build: runtime + the game recompiled at build time (sa2b) ----------------------
 # Generate with: sa2recompile --dol orig/main.dol --rels orig/rel --names config/GSNE8P/names.txt
 #                --out build/gen      (nothing generated is ever committed)
 set(SA2_GEN_DIR "${CMAKE_SOURCE_DIR}/build/gen" CACHE PATH "Recompiler output for the developer build")
 file(GLOB SA2_GEN_SOURCES CONFIGURE_DEPENDS ${SA2_GEN_DIR}/*.cpp)
 if (SA2_GEN_SOURCES)
-    file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS src/runtime/*.cpp)
-    add_executable(sa2b ${RUNTIME_SOURCES} ${SA2_GEN_SOURCES})
+    file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS src/runtime/*.cpp src/modhost/*.cpp)
+    add_executable(sa2b ${RUNTIME_SOURCES} ${SA2_GEN_SOURCES} ${SA2_ICON_RC})
     target_include_directories(sa2b PRIVATE src ${SA2_GEN_DIR})
     # Generated code: one big function per guest function with gotos; no debug info (it is huge),
     # unwind tables so a guest thread can end by unwinding through it.

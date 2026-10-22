@@ -10,3 +10,14 @@ __pycache__/
 *.pyc
 saves/
 mods/
+# Local state: settings, logs, HD textures, the upscaler (Python, PyTorch, models: fetched by
+# tools/hd/setup.ps1 - the HDcube licence does not allow redistributing the model)
+launcher.ini
+*.log
+textures/
+tools/hd/venv/
+tools/hd/python/
+tools/hd/models/
+tools/hd/download/
+tools/hd/setup_status.txt
+dist/

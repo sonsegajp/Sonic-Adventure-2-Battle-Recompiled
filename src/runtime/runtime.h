@@ -2,6 +2,8 @@
 // Runtime internals shared by the host side (memory, dispatch, HLE registry, logging).
 #include "runtime/ctx.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <string>
@@ -23,7 +25,13 @@ inline u32 phys(u32 a) { return a & 0x01FFFFFF; }
 constexpr u32 kHleRegion = 0x80000000 + kMem1Size;
 constexpr u32 kHleRegionEnd = 0x80000000 + kHostMemSize;
 u32 hleAlloc(u32 size, u32 align = 32);
-void profileRegisterThread();  // src/runtime/profile.cpp (SA2_PROFILE)
+// Widescreen changes to the game's code (src/runtime/fixes.cpp), while their module is linked.
+void gameFixesLinked(u32 module);
+void gameFixesUnlinked(u32 module);
+void gameFixesInit();   // main.dol changes (src/runtime/fixes.cpp), at startup
+void gameFixesFrame();  // ... and their per-frame part, on the game thread
+extern std::atomic<float> g_wideExtra;  // logical units shown beyond each side of the 4:3 screen (frontend)
+void profileRegisterThread();  // src/runtime/profile.cpp: every thread running game code (priority; SA2_PROFILE)
 inline const char* gstr(u32 a) { return reinterpret_cast<const char*>(hostp(a)); }
 
 // ---- dispatch ----
@@ -64,9 +72,15 @@ void raiseInterrupt(u32 id, void (*before)() = nullptr);
 // ---- time ----
 u64 timebase();  // guest time base: 40.5 MHz (bus clock / 4) since boot
 constexpr u64 kTimebaseHz = 40500000;
+// Sleeps until `t` (host steady clock) within about half a millisecond; `spin` lands on it exactly
+// (src/runtime/hosttime.cpp).
+void sleepUntil(std::chrono::steady_clock::time_point t, bool spin);
 
 // ---- mods (src/runtime/mods.cpp) ----
 void modsInit();                                // loads mods/: native ports of code mods, file overrides
 std::string modFile(const std::string& discPath);  // a mod's replacement for a disc file, or empty
+// SA Mod Manager's ReplaceFile: `gamePath` (resource\gd_PC\... or a disc path) is `hostFile`
+// (empty: back to the original).
+void modReplaceFile(const std::string& gamePath, const std::string& hostFile);
 
 }  // namespace rt

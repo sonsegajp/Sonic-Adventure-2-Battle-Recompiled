@@ -13,21 +13,26 @@
 #include <aurora/gfx.h>
 #include <aurora/gfx.hpp>
 #include <dolphin/gx.h>
+#include <aurora/texture.hpp>  // (needs GXTexObj from dolphin/gx.h)
 #include <dolphin/mtx.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
+#include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
+#include <SDL3/SDL_video.h>
 
 #include "gx/fifo.hpp"
 #include "window.hpp"
 #include "webgpu/gpu.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,7 +43,9 @@ extern std::atomic<u64> g_relLinkFrame[256];  // src/runtime/dispatch.cpp
 extern std::atomic<bool> g_stopRequested;     // src/runtime/dispatch.cpp
 extern std::atomic<bool> g_relLinked[256];    // src/runtime/dispatch.cpp
 std::string dvdPendingSummary();                // src/runtime/hle_dvd.cpp
+void profileSnapshot(int samples, int ms);       // src/runtime/profile.cpp
 void dumpAllThreads();                         // src/runtime/cpu.cpp
+u64 hostGpuMemory();                           // src/runtime/hostgpu.cpp
 
 namespace {
 std::mutex s_padLock;
@@ -88,6 +95,39 @@ u16 scriptedButtons() {
             f = (f & ~kRelPress) + link;
         }
         if (s_frameNo >= f && s_frameNo < f + 8) held |= m;
+    }
+    // SA2_MENU_PRESS="<menu>.<sub>:<button>;..." (test runs): while the menus are in that state
+    // (advertiseD.rel's CurrentMenu / CurrentSubMenu, see SA2_MENU_LOG) for half a second, the button
+    // is pressed, again every second until the state changes - menus are driven by what they show,
+    // not by frame counts (loading times vary).
+    if (const char* mp = std::getenv("SA2_MENU_PRESS"); mp && g_relLinked[91]) {
+        const u32 at = g_relBase[91][6] + 0x62054;
+        const u32 m = rd32(at), sm = rd32(at + 4);
+        static u32 s_state = ~0u;
+        static u64 s_since = 0;
+        if ((m << 16 | sm) != s_state) s_state = m << 16 | sm, s_since = s_frameNo;
+        const u64 held = s_frameNo - s_since;
+        for (const char* p = mp; *p;) {
+            unsigned em = 0, es = 0;
+            char list[64] = {};
+            // a state's buttons (comma-separated) go in turn, one a second, round again until it changes
+            if (std::sscanf(p, "%u.%u:%63[A-Z,]", &em, &es, list) == 3 && em == m && es == sm && held >= 30 && (held - 30) % 60 < 8) {
+                std::vector<std::string> btns;
+                for (const char* q = list; *q;) {
+                    const char* comma = std::strchr(q, ',');
+                    btns.emplace_back(q, comma ? size_t(comma - q) : std::strlen(q));
+                    if (!comma) break;
+                    q = comma + 1;
+                }
+                const std::string& b = btns[size_t((held - 30) / 60) % btns.size()];
+                return b == "A" ? PAD_BUTTON_A : b == "B" ? PAD_BUTTON_B : b == "START" ? PAD_BUTTON_START
+                     : b == "LEFT" ? PAD_BUTTON_LEFT : b == "RIGHT" ? PAD_BUTTON_RIGHT : b == "UP" ? PAD_BUTTON_UP
+                     : b == "DOWN" ? PAD_BUTTON_DOWN : b == "SL" ? kStickLeft : b == "SR" ? kStickRight : u16(0);
+            }
+            const char* semi = std::strchr(p, ';');
+            if (!semi) break;
+            p = semi + 1;
+        }
     }
     // SA2_SKIP_EVENTS: while an event plays (eventD, module 80 linked), START is pressed every 120
     // frames, as a player skips it (stage test runs).
@@ -183,6 +223,14 @@ void efbWriteTask(const aurora::gfx::EncoderTaskCompletionContext&, const void* 
 }
 
 void dumpEfb(const std::string& path) {
+    // At most SA2_DUMP_MAX (300) dumps a run: 3.6 MB each, a test asking for every frame must not
+    // fill the disk.
+    static const u32 s_max = std::getenv("SA2_DUMP_MAX") ? u32(std::atoi(std::getenv("SA2_DUMP_MAX"))) : 300;
+    static u32 s_dumped = 0;
+    if (s_dumped++ >= s_max) {
+        if (s_dumped == s_max + 1) log("[frontend] %u frames dumped: no more this run (SA2_DUMP_MAX)\n", s_max);
+        return;
+    }
     if (s_efbTask == aurora::gfx::InvalidEncoderTask)
         s_efbTask = aurora::gfx::register_encoder_task_type({.label = "EFB dump", .callback = efbCopyTask, .afterSubmit = efbWriteTask});
     aurora::gx::fifo::drain();  // the frame's commands are recorded; the EFB pass is still open
@@ -337,9 +385,26 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         .windowHeight = winH,
         .logCallback = &auroraLog,
     };
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");  // the window's icon: the program's (res/sa2b.rc)
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
     AuroraSetViewportPolicy(widescreen ? AURORA_VIEWPORT_STRETCH : AURORA_VIEWPORT_FIT);
     AuroraSetWidescreen(widescreen);
+    // --hd-textures <folder>: the launcher's HD texture pack (tools/hd/build_pack.py). Aurora looks a
+    // replacement up as each texture loads, by size, format and the hash of its texels (Dolphin's
+    // tex1_ names), and streams it in.
+    // The ones loaded stay cached up to a budget (least recently used dropped first): about a third
+    // of the graphics card's memory (Aurora's own 4 GB would fill a 6 GB card with the game's
+    // buffers besides), 0.5-4 GB.
+    for (int i = 1; i + 1 < argc; i++)
+        if (!std::strcmp(argv[i], "--hd-textures")) {
+            const u64 vram = hostGpuMemory();
+            const u64 budget = std::clamp<u64>(vram ? vram * 3 / 10 : 1ull << 30, 512ull << 20, 4ull << 30);
+            aurora::texture::set_replacement_cache_budget(budget);
+            const auto group = aurora::texture::load_replacement_directory(std::filesystem::path(argv[i + 1]));
+            log("[frontend] HD textures: %zu from %s; up to %llu MB kept (card: %llu MB)\n", group.registrations.size(), argv[i + 1],
+                (unsigned long long)(budget >> 20), (unsigned long long)(vram >> 20));
+        }
     log("[frontend] Aurora up: backend %d, window %ux%u, framebuffer %ux%u\n", int(info.backend), info.windowSize.width,
         info.windowSize.height, info.windowSize.fb_width, info.windowSize.fb_height);
     // Aurora's own GX/VI state starts from its GXInit defaults and a 640x480 NTSC logical
@@ -373,30 +438,187 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
 
     const char* dumpDir = std::getenv("SA2_DUMP_DIR");
     const u64 dumpEvery = std::getenv("SA2_DUMP_EVERY") ? std::strtoull(std::getenv("SA2_DUMP_EVERY"), nullptr, 10) : 60;
-    std::vector<u8> frame;
-    std::vector<std::unique_ptr<u8[]>> snapshots;  // array data the frame's commands point into
-    u64 presented = 0;
+    // In-between frames (src/runtime/gxinterp.cpp): on when the display is faster than the game's
+    // 60 Hz, then paced by the display (vsync); --interp / --no-interp (or SA2_INTERP=1/0) force
+    // them. SA2_INTERP_TEST=<t> (test runs) draws every game frame once, at t between it and the one
+    // before, for checking the blending in dumps.
+    int interpMode = -1;
+    for (int i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--interp")) interpMode = 1;
+        else if (!std::strcmp(argv[i], "--no-interp")) interpMode = 0;
+    }
+    if (const char* e = std::getenv("SA2_INTERP")) interpMode = std::atoi(e) ? 1 : 0;
+    const double interpTest = std::getenv("SA2_INTERP_TEST") ? std::atof(std::getenv("SA2_INTERP_TEST")) : -1.0;
+    float refresh = 0;
+    if (SDL_Window* w = aurora::window::get_sdl_window())
+        if (const SDL_DisplayMode* m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(w))) refresh = m->refresh_rate;
+    const bool interp = interpTest < 0 && (interpMode == 1 || (interpMode < 0 && !headless && refresh > 65.f));
+    if (interp && !std::getenv("SA2_NO_VSYNC")) aurora_enable_vsync(true);  // (SA2_NO_VSYNC: measure the cost unpaced)
+    log("[frontend] display %.0f Hz: in-between frames %s\n", refresh, interp ? "on" : interpTest >= 0 ? "test" : "off");
+
+    std::vector<std::shared_ptr<GxFrame>> fresh;
+    std::vector<u8> frame;                       // the commands drawn this time
+    std::vector<std::unique_ptr<u8[]>> keep[2];  // blended vertex arrays of this draw and the last
+    std::shared_ptr<GxFrame> held[2];            // the frames they draw (their snapshots)
+    int kb = 0;
+    u64 presented = 0, renders = 0;              // game frames taken; frames drawn
+    double interval = 1.0 / 60, lastTime = -1;
+    const GxFrame* lastShown = nullptr;
+    float lastT = -1;
     for (;;) {
         bool exiting = false;
         for (const AuroraEvent* ev = aurora_update(); ev && ev->type != AURORA_NONE; ++ev)
             if (ev->type == AURORA_EXIT) exiting = true;
         if (exiting) break;
         pollPads();
+        {  // what widescreen shows beyond each side of the 4:3 screen, for the game-code changes
+            const AuroraWindowSize ws = aurora::window::get_window_size();
+            const float aspect = ws.fb_height ? float(ws.fb_width) / float(ws.fb_height) : 4.f / 3.f;
+            g_wideExtra = widescreen ? std::max(0.f, 320.f * (aspect * 0.75f - 1.f)) : 0.f;
+        }
         {  // F11: fullscreen on/off
             static bool s_f11 = false, s_full = fullscreen;
             const bool down = SDL_GetKeyboardState(nullptr)[SDL_SCANCODE_F11];
             if (down && !s_f11) aurora::window::set_fullscreen(s_full = !s_full);
             s_f11 = down;
         }
-        if (!gxTakeFrame(frame, snapshots, 16)) continue;  // keep the window responsive while the game loads
-        static u64 s_taken = 0, s_refused = 0;
-        if (++s_taken <= 3 || s_taken % 600 == 0)
-            log("[frontend] game frame %llu: %zu bytes of GX commands\n", (unsigned long long)s_taken, frame.size());
+        // The game's finished frames (waiting a little when there is nothing to draw).
+        gxTakeFrames(fresh, interp && gxInterpNewest() ? 0 : 16);
+        {  // A hang: no new game frame for 3 s - where every thread is, what the disc is doing (once per hang).
+            static double s_lastFrameAt = gxNow();
+            static bool s_reported = false;
+            if (!fresh.empty()) s_lastFrameAt = gxNow(), s_reported = false;
+            else if (presented > 0 && !s_reported && gxNow() - s_lastFrameAt > 3.0) {
+                s_reported = true;
+                // (the game's mode at 803AD818: 0x10 playing, 0x11 paused, else loading/menus; level at 803AD820)
+                log("[stall] no game frame for 3 s (last: frame %llu, game mode %X, level %u); disc: %s\n", (unsigned long long)presented,
+                    rd32(0x803AD818), rd16(0x803AD820), dvdPendingSummary().c_str());
+                sched::debugDump();
+                profileSnapshot(100, 500);
+            }
+        }
+        bool stop = false;
+        for (auto& f : fresh) {
+            if (lastTime >= 0) interval = std::clamp(0.9 * interval + 0.1 * (f->time - lastTime), 1.0 / 75, 1.0 / 40);
+            lastTime = f->time;
+            presented++;
+            if (presented <= 3 || presented % 600 == 0)
+                log("[frontend] game frame %llu: %zu bytes of GX commands\n", (unsigned long long)presented, f->cmds.size());
+            // Freeze evidence: the same command stream for 3 s (gameplay waiting on something) logs
+            // what the game threads and the disc are doing. Static menus trip it too, hence the cap.
+            {
+                static u64 s_lastHash = 0, s_same = 0;
+                static int s_reports = 0;
+                u64 h = 1469598103934665603ull ^ f->cmds.size();
+                for (size_t i = 0; i < f->cmds.size(); i += 61) h = (h ^ f->cmds[i]) * 1099511628211ull;
+                s_same = h == s_lastHash ? s_same + 1 : 0;
+                s_lastHash = h;
+                if (s_same == 180 && s_reports++ < 6) {
+                    log("[stall] frame %llu: the game has shown an identical frame for 3 s; disc: %s\n",
+                        (unsigned long long)presented, dvdPendingSummary().c_str());
+                    dumpAllThreads();
+                    sched::debugDump();
+                }
+            }
+            s_frameNo = presented;
+            // The menus' CurrentMenu / CurrentSubMenu (advertiseD.rel bss +62054/+62058, as on PC
+            // 0x1D7BB10) are logged as they change (where a session went, in sa2b.log); test runs:
+            // SA2_MENU=<menu>:<sub>@<from> sets them once, after menu <from> has been showing for a
+            // second (straight to a menu).
+            if (g_relLinked[91]) {
+                const u32 at = g_relBase[91][6] + 0x62054;
+                static u32 s_last[2] = {~0u, ~0u};
+                const u32 m = rd32(at), sm = rd32(at + 4);
+                if (m != s_last[0] || sm != s_last[1])
+                    log("[menu] frame %llu: menu %u sub %u\n", (unsigned long long)presented, m, sm), s_last[0] = m, s_last[1] = sm;
+                static bool s_set = false;
+                static u64 s_since = 0;
+                static u32 s_seen = ~0u;
+                if (m != s_seen) s_seen = m, s_since = presented;
+                if (const char* e = std::getenv("SA2_MENU"); e && !s_set) {
+                    unsigned menu = 0, sub = 0, from = 0;
+                    std::sscanf(e, "%u:%u@%u", &menu, &sub, &from);
+                    if (m == from && presented >= s_since + 60) wr32(at, menu), wr32(at + 4, sub), s_set = true;
+                }
+            }
+            if (const char* gxDump = std::getenv("SA2_GXDUMP_FRAME"); gxDump && presented == std::strtoull(gxDump, nullptr, 10)) {
+                if (std::FILE* fo = std::fopen("build/gxframe.bin", "wb")) {  // decode with tools/gxdump.py
+                    std::fwrite(f->preamble.data(), 1, f->preamble.size(), fo);
+                    std::fwrite(f->cmds.data(), 1, f->cmds.size(), fo);
+                    std::fclose(fo);
+                }
+            }
+            gxInterpPush(f);
+            if (maxFrames && presented >= maxFrames) stop = true;
+            // SA2_STOP_AFTER=N with SA2_DUMP_REL: exit N frames after that module linked (test runs).
+            static const u64 s_stopAfter = std::getenv("SA2_STOP_AFTER") ? std::strtoull(std::getenv("SA2_STOP_AFTER"), nullptr, 10) : 0;
+            static const int s_stopRel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) : -1;
+            if (s_stopAfter && s_stopRel >= 0) {
+                const u64 link = g_relLinkFrame[s_stopRel & 255].load();
+                if (link && presented >= link - 1 + s_stopAfter) stop = true;
+            }
+            if (g_stopRequested) stop = true;
+        }
+        if (stop) break;
+        if (!gxInterpNewest()) continue;  // keep the window responsive while the game loads
+        const bool newFrame = !fresh.empty();
+        // What to draw: without in-between frames, each game frame once; with them, the frames due
+        // one frame (and a little) after the game finished them, blended to the display's time.
+        double when;
+        if (interpTest >= 0) {
+            if (!newFrame) continue;
+            when = gxInterpNewestTime() - (1.0 - interpTest) * interval;
+            // A dumped frame: drawn at t = 0, the test's t and 1, each dumped (_t0, _tN, _t1).
+            static const u64 s_tdFrom = std::getenv("SA2_DUMP_FROM") ? std::strtoull(std::getenv("SA2_DUMP_FROM"), nullptr, 10) : 0;
+            static const int s_tdRel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) : -1;
+            const u64 link = s_tdRel >= 0 ? g_relLinkFrame[s_tdRel & 255].load() : 1;
+            const u64 at = link ? link - 1 + s_tdFrom : ~0ull;
+            if (dumpDir && dumpEvery && presented >= at && (presented - at) % dumpEvery == 0) {
+                for (const double tt : {0.0, interpTest, 1.0}) {
+                    keep[kb].clear();
+                    float got = 1.f;
+                    held[kb] = gxInterpBuild(gxInterpNewestTime() - (1.0 - tt) * interval, frame, keep[kb], &got);
+                    if (!held[kb] || !aurora_begin_frame()) continue;
+                    kb ^= 1;
+                    aurora::gx::fifo::write_data(frame.data(), u32(frame.size()));
+                    char path[512];
+                    std::snprintf(path, sizeof path, "%s/frame_%05llu_t%02d.rgba", dumpDir, (unsigned long long)presented,
+                                  int(tt * 10 + 0.5));
+                    dumpEfb(path);
+                    aurora_end_frame();
+                    renders++;
+                }
+                continue;
+            }
+        } else if (!interp) {
+            if (!newFrame) continue;
+            when = 1e300;
+        } else {
+            when = gxInterpShowTime(gxNow());
+        }
+        keep[kb].clear();
+        float t = 1.f;
+        static double s_tBuild = 0, s_tWrite = 0, s_tEnd = 0;  // seconds spent, for the stats line
+        const double c0 = gxNow();
+        std::shared_ptr<GxFrame> shown = gxInterpBuild(when, frame, keep[kb], &t);
+        if (!shown) continue;
+        if (interp && shown.get() == lastShown && t >= 1.f && lastT >= 1.f) {
+            // The newest frame is on screen and nothing newer has come: drawing it again shows nothing new.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        lastShown = shown.get();
+        lastT = t;
+        held[kb] = std::move(shown);
+        const double c1 = gxNow();
+        s_tBuild += c1 - c0;
+        static u64 s_refused = 0;
         if (!aurora_begin_frame()) {
             if (++s_refused <= 3 || s_refused % 600 == 0)
                 log("[frontend] aurora_begin_frame refused (%llu)\n", (unsigned long long)s_refused);
             continue;
         }
+        kb ^= 1;
         static const char* s_isolate = std::getenv("SA2_ISOLATE");  // "api": Aurora API only, "quad": test quad only
         if (s_isolate && !std::strcmp(s_isolate, "api")) {
             GXSetCopyClear(GXColor{0, 200, 0, 255}, 0xFFFFFF);
@@ -469,36 +691,15 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
             aurora::gx::fifo::write_data(red, sizeof red);
         }
         aurora::gx::fifo::write_data(frame.data(), u32(frame.size()));
-        presented++;
-        // Freeze evidence: the same command stream for 3 s (gameplay waiting on something) logs
-        // what the game threads and the disc are doing. Static menus trip it too, hence the cap.
-        {
-            static u64 s_lastHash = 0, s_same = 0;
-            static int s_reports = 0;
-            u64 h = 1469598103934665603ull ^ frame.size();
-            for (size_t i = 0; i < frame.size(); i += 61) h = (h ^ frame[i]) * 1099511628211ull;
-            s_same = h == s_lastHash ? s_same + 1 : 0;
-            s_lastHash = h;
-            if (s_same == 180 && s_reports++ < 6) {
-                log("[stall] frame %llu: the game has shown an identical frame for 3 s; disc: %s\n",
-                    (unsigned long long)presented, dvdPendingSummary().c_str());
-                dumpAllThreads();
-                sched::debugDump();
-            }
-        }
-        s_frameNo = presented;
-        if (const char* gxDump = std::getenv("SA2_GXDUMP_FRAME"); gxDump && presented == std::strtoull(gxDump, nullptr, 10)) {
-            if (std::FILE* f = std::fopen("build/gxframe.bin", "wb")) {  // decode with tools/gxdump.py
-                std::fwrite(frame.data(), 1, frame.size(), f);
-                std::fclose(f);
-            }
-        }
+        const double c2 = gxNow();
+        s_tWrite += c2 - c1;
+        renders++;
         // SA2_DUMP_FROM counts from the start, or with SA2_DUMP_REL=<module id> from that REL's link.
         static const u64 s_dumpFrom = std::getenv("SA2_DUMP_FROM") ? std::strtoull(std::getenv("SA2_DUMP_FROM"), nullptr, 10) : 0;
         static const int s_dumpRel = std::getenv("SA2_DUMP_REL") ? std::atoi(std::getenv("SA2_DUMP_REL")) : -1;
         const u64 relLink = s_dumpRel >= 0 ? g_relLinkFrame[s_dumpRel & 255].load() : 1;
         const u64 dumpAt = relLink ? relLink - 1 + s_dumpFrom : ~0ull;
-        if (dumpDir && dumpEvery && presented >= dumpAt && (presented - dumpAt) % dumpEvery == 0) {
+        if (newFrame && dumpDir && dumpEvery && presented >= dumpAt && (presented - dumpAt) % dumpEvery == 0) {
             if (std::getenv("SA2_DUMP_QUAD") || (s_isolate && !std::strcmp(s_isolate, "quad"))) requestFrameDump(presented);
             char path[512];
             std::snprintf(path, sizeof path, "%s/frame_%05llu.rgba", dumpDir, (unsigned long long)presented);
@@ -512,28 +713,25 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
             }
         }
         aurora_end_frame();
-        if (presented % 300 == 0 || presented == 30) {
+        s_tEnd += gxNow() - c2;
+        if (newFrame && (presented % 300 == 0 || presented == 30)) {
             static auto s_last = std::chrono::steady_clock::now();
-            static u64 s_lastFrames = 0, s_lastRetraces = 0, s_lastSubmits = 0;
+            static u64 s_lastFrames = 0, s_lastRetraces = 0, s_lastSubmits = 0, s_lastRenders = 0;
             const auto now = std::chrono::steady_clock::now();
             const double secs = std::chrono::duration<double>(now - s_last).count();
             const u64 retraces = viRetraces(), submits = gxFrames();
             const double fps = secs > 0 ? double(presented - s_lastFrames) / secs : 0;
             const double hz = secs > 0 ? double(retraces - s_lastRetraces) / secs : 0;
             const double gameFps = secs > 0 ? double(submits - s_lastSubmits) / secs : 0;
-            s_last = now, s_lastFrames = presented, s_lastRetraces = retraces, s_lastSubmits = submits;
+            const double drawFps = secs > 0 ? double(renders - s_lastRenders) / secs : 0;
+            const double per = double(std::max<u64>(1, renders - s_lastRenders)) / 1000.0;  // ms per draw
+            s_last = now, s_lastFrames = presented, s_lastRetraces = retraces, s_lastSubmits = submits, s_lastRenders = renders;
             const AuroraStats* st = aurora_get_stats();
-            log("[frontend] %llu frames, %.1f fps (game submits %.1f/s, VI %.1f Hz); %zu bytes GX; Aurora: %u draws (%u merged), %u pipelines\n",
-                (unsigned long long)presented, fps, gameFps, hz, frame.size(), st->drawCallCount,
-                st->mergedDrawCallCount, st->createdPipelines);
-        }
-        if (maxFrames && presented >= maxFrames) break;
-        if (g_stopRequested) break;
-        // SA2_STOP_AFTER=N with SA2_DUMP_REL: exit N frames after that module linked (test runs).
-        static const u64 s_stopAfter = std::getenv("SA2_STOP_AFTER") ? std::strtoull(std::getenv("SA2_STOP_AFTER"), nullptr, 10) : 0;
-        if (s_stopAfter && s_dumpRel >= 0) {
-            const u64 link = g_relLinkFrame[s_dumpRel & 255].load();
-            if (link && presented >= link - 1 + s_stopAfter) break;
+            log("[frontend] %llu frames, %.1f fps (game submits %.1f/s, VI %.1f Hz), drawn %.1f/s (ms each: build %.2f, "
+                "commands %.2f, end %.2f); %zu bytes GX; Aurora: %u draws (%u merged), %u pipelines\n",
+                (unsigned long long)presented, fps, gameFps, hz, drawFps, s_tBuild / per, s_tWrite / per, s_tEnd / per,
+                frame.size(), st->drawCallCount, st->mergedDrawCallCount, st->createdPipelines);
+            s_tBuild = s_tWrite = s_tEnd = 0;
         }
     }
     log("[frontend] exiting after %llu frames\n", (unsigned long long)presented);

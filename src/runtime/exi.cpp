@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -56,6 +57,8 @@ struct MemoryCard : Device {
         if (file) {
             std::fread(image.data(), 1, image.size(), file);
         } else {
+            std::error_code ec;  // (its folder too: a first run has no saves/ yet)
+            if (const auto dir = std::filesystem::path(path).parent_path(); !dir.empty()) std::filesystem::create_directories(dir, ec);
             file = std::fopen(path.c_str(), "w+b");  // a new, unformatted card: the game offers to format it
             if (file) std::fwrite(image.data(), 1, image.size(), file);
         }

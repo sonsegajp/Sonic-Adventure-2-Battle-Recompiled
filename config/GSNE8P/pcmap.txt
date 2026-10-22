@@ -1,0 +1,68 @@
+# PC executable (Steam sonic2app.exe, the one SA Mod Manager's mods are made for) <-> GameCube
+# (GSNE8P) correspondences: what the mod host's bridge (src/modhost/bridge.cpp) translates PC code
+# mods with. Facts about the two builds of the game, not about any mod - every mod that touches a
+# place listed here is translated by the same entry.
+#
+#   insn <pc> <bytes> <sites> [regs=<x86>:<gc>,...] [inv] [fpu=<mask>]   # note
+#       The PC instruction at <pc> (its original encoding <bytes>) is the GameCube code at <sites>,
+#       comma-separated: an instruction "X", the fall-through after an instruction "X+", or the
+#       taken edge of a branch "X>" (the GameCube compiler merged and duplicated code, so one PC
+#       instruction can be several places). A changed immediate, displacement, memory operand or
+#       condition is applied to the GameCube instruction; a branch or call redirected to mod code
+#       runs the mod's x86 code there.
+#       regs=   x86 registers whose values are in these GameCube registers at that point
+#       inv     the GameCube branch is taken when the PC one is not
+#       fpu=    the PC branch tests an x87 compare: fnstsw ax; test ah, <mask>
+#   func <pc> <gc> <gc reg>=<x86 source>,... [ret=eax]   # sources: eax..edi, s0 s1... (stack)
+#   data <pc> <gc> <bytes> [elem=<n>]                   # a variable, byte-swapped by element
+#   pad <pc> <bytes>                                    # padding between functions
+
+# ---- variables ----
+data 01934B70 803AD820 2 elem=2          # CurrentLevel (s16)
+data 01DE9600 801E7728 8 elem=4          # MainCharObj2[2]: the players' playerwk
+
+# ---- functions ----
+func 004372E0 8006B7EC r3=edi,r4=s0,r5=s1,r6=s2,r7=esi   # PlayVoice(id, ?, ?, volume?, position)
+
+# ---- Sonic/Shadow actions (sonic.c-like player code, GameCube 8007xxxx-8008xxxx) ----
+# End of the light attack: the action that follows, its animation, the speed it keeps.
+insn 0071A44C c6030a 8007F5E8                                  # mov byte [ebx], 0Ah (action)
+insn 0071A44F b80f000000 8007F5F0                              # mov eax, 0Fh (animation)
+insn 0071A468 d985d8000000 8007F60C                            # fld [ebp+0D8h]
+# Grinding: leaning too long on a rail.
+insn 0071A704 6683be6003000078 8007F9BC                        # cmp word [esi+360h], 78h
+insn 0071A70C 7e68 8007F9C0                                    # jle
+# Homing attack: the height difference limit (8.0).
+insn 0071AEFA d81da4f0c500 800801E4,80080504,800807CC regs=ebp:r31   # fcomp [0C5F0A4h]
+# Homing attack voices (Shadow, then Sonic; three GameCube copies each).
+insn 0071AF92 bf09300000 80080290,800805B0,80080878           # mov edi, 3009h
+insn 0071AF97 e844c3d1ff 800802A0,800805C0,80080888 regs=esi:r7  # call PlayVoice
+insn 0071B3E7 bf1b300000 800802B4,800805D4,8008089C           # mov edi, 301Bh
+insn 0071B3EC e8efbed1ff 800802C4,800805E4,800808AC regs=esi:r7  # call PlayVoice
+# Bouncing off an enemy: the bounce counter.
+insn 0071BC65 0f8c50080000 80081130 regs=esi:r29              # jl
+insn 0071BC72 e944080000 80081138+ regs=esi:r29                # jmp (the GameCube falls through)
+insn 0071C4BB 66833900 8008113C                                # cmp word [ecx], 0
+
+# Magic Hands: the action an enemy is caught with.
+insn 00722921 c6450015 800796E0,8007A234,80095F0C,80096488    # mov byte [ebp+0], 15h
+
+# Somersault: the speeds it sets (GameCube copies grouped by the constant they store).
+insn 00723569 ba60000000 80078A64                              # mov edx, 60h (animation)
+insn 00723591 d95f64 80078A9C                                  # fstp [edi+64h] (1.875)
+insn 007235DE d95b64 80077BE8,80077ED4,800781E4,800784AC,80078670,80078840   # fstp [ebx+64h] (speed cap)
+insn 0072364E d95b64 80077BE8,80077ED4,800781E4,800784AC,80078670,80078840   # fstp [ebx+64h] (speed cap)
+insn 007239B8 d95d64 80077B2C,80077E18,800780F8,800783C0,80078638,80078808   # fstp [ebp+64h] (1.875)
+insn 00723A46 d95d64 800779E8,80077CC8,80077FB4,8007827C,800786F8   # fstp [ebp+64h] (0.0)
+insn 00723B08 d95d64 80077F5C                                  # fstp [ebp+64h] (3.125)
+insn 00723DA1 d95d64 800779E8,80077CC8,80077FB4,8007827C,800786F8   # fstp [ebp+64h] (0.0)
+pad 007235B6 10
+
+# Grinding: the lean animations, and the lean timer reset (|lean| against 0.6).
+insn 00726B97 66898d76010000 800754A0,800754C8,8007557C,800755A4   # mov [ebp+176h], cx (0x70)
+insn 00726BBA 66898576010000 800754B4,800754DC,80075590,800755B8   # mov [ebp+176h], ax (0x71)
+insn 00726C02 0f8a81000000 80075320 fpu=5                      # jp
+
+# ---- the action prompt (the button hint), GameCube f_80010B38 ----
+# Its last ret: the GameCube merged both returns into one epilogue; these are the paths of this one.
+insn 0079427A c3 80010BA4>,80010BB0>,80010C20>,80010C90>,80010CA4+   # ret

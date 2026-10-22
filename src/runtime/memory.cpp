@@ -30,7 +30,7 @@ bool loadDol(const std::vector<u8>& d, u32& entry) {
     return true;
 }
 
-static u32 s_hleNext = kHleRegion;
+static u32 s_hleNext = kHleRegion + 0x4000;  // past the locked cache, which shares the host bytes at its start
 
 u32 hleAlloc(u32 size, u32 align) {
     s_hleNext = (s_hleNext + align - 1) & ~(align - 1);

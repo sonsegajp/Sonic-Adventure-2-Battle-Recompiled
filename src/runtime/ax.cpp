@@ -21,10 +21,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unordered_map>
 
 namespace rt {
 
 u8* aramPtr(u32 a);  // src/runtime/hle_hw.cpp
+u64 gxFrames();     // src/runtime/gx.cpp
 
 namespace {
 constexpr u32 kSpms = 32;           // samples per millisecond
@@ -231,6 +233,17 @@ void processVoices(u32 pb) {
                 aramPtr(cur * 2 + 2)[0] << 8 | aramPtr(cur * 2 + 3)[0], aramPtr(cur * 2 + 64)[0] << 8 | aramPtr(cur * 2 + 65)[0],
                 aramPtr(cur * 2 + 512)[0] << 8 | aramPtr(cur * 2 + 513)[0], v.w[PB_UPDATES], v.w[PB_UPDATES + 1],
                 v.w[PB_UPDATES + 2], v.w[PB_UPDATES + 3], v.w[PB_UPDATES + 4], mix);
+        }
+        // SA2_AX_STARTS: each voice start, with the game frame it came on (stream timing checks).
+        static const bool s_starts = std::getenv("SA2_AX_STARTS") != nullptr;
+        if (s_starts) {
+            static std::unordered_map<u32, u16> s_wasRunning;
+            u16& was = s_wasRunning[pb];
+            if (v.w[PB_RUNNING] && !was)
+                log("[ax] frame %llu: voice %08X starts (fmt %02X stream %u ratio %08X cur %08X loop %08X)\n",
+                    (unsigned long long)gxFrames(), pb, v.w[PB_FORMAT], v.w[PB_IS_STREAM], v.get32(PB_RATIO),
+                    v.get32(PB_CUR_ADDR), v.get32(PB_LOOP_ADDR));
+            was = v.w[PB_RUNNING];
         }
         const u32 updates = v.get32(PB_UPDATES + 5);
         u32 first = 0;
