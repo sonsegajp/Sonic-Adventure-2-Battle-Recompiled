@@ -193,10 +193,14 @@ HLE(PADReset) { c.r[3] = 1; }
 HLE(PADRecalibrate) { c.r[3] = 1; }
 HLE(PADControlMotor) {}
 void padSnapshot(u8 out[4][12]);  // src/runtime/frontend.cpp (host controllers via Aurora)
+namespace coop {
+void padFilter(u8 pads[4][12]);  // src/runtime/coopgame.cpp: in co-op, player 1 drives menus and cutscenes
+}
 HLE(PADRead) {
     u8 pads[4][12];
     padSnapshot(pads);
     tasEntry(pads[0]);
+    coop::padFilter(pads);
     s_padReads++;
     u32 mask = 0;
     for (u32 i = 0; i < 4; i++) {
