@@ -12,6 +12,7 @@
 // SETUP page builds it from the player's disc (setup.h, docs/SETUP.md).
 #include "launcher/disc.h"
 #include "launcher/setup.h"
+#include "net/coopnet.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -35,6 +36,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <tlhelp32.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -376,6 +378,27 @@ struct GameProcess {
         return error = "starting the game is only written for Windows so far", false;
 #endif
     }
+    // After it started itself again (co-op): follow the new process, the old one's child.
+    bool adoptChild() {
+#ifdef _WIN32
+        if (!proc) return false;
+        const DWORD parent = GetProcessId(proc);
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) return false;
+        PROCESSENTRY32W pe{sizeof pe};
+        DWORD child = 0;
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe))
+            if (pe.th32ParentProcessID == parent && _wcsicmp(pe.szExeFile, L"sa2b.exe") == 0) child = pe.th32ProcessID;
+        CloseHandle(snap);
+        HANDLE h = child ? OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, child) : nullptr;
+        if (!h) return false;
+        CloseHandle(proc);
+        proc = h;
+        return true;
+#else
+        return false;
+#endif
+    }
     // After it ended: its exit code.
     unsigned long exitCode() {
 #ifdef _WIN32
@@ -466,7 +489,44 @@ std::string fmtClock(float seconds) {  // time so far, m:ss
 }
 
 // ---- the app ----
-enum class Screen { Main, Settings, Hd, Mods, Setup };
+enum class Screen { Main, Settings, Hd, Mods, Setup, Coop };
+
+// ---- co-op settings: coop.ini, shared with the game (src/runtime/coop.cpp); keys it does not use here are kept ----
+struct CoopIni {
+    std::vector<std::pair<std::string, std::string>> kv;
+    std::string get(const std::string& k, const std::string& def = "") const {
+        for (auto& [a, b] : kv)
+            if (a == k) return b;
+        return def;
+    }
+    void set(const std::string& k, const std::string& v) {
+        for (auto& [a, b] : kv)
+            if (a == k) return void(b = v);
+        kv.push_back({k, v});
+    }
+    void load(const fs::path& p) {
+        kv.clear();
+        std::ifstream f(p);
+        for (std::string l; std::getline(f, l);) {
+            if (!l.empty() && l.back() == '\r') l.pop_back();
+            const size_t eq = l.find('=');
+            if (eq != std::string::npos) kv.push_back({l.substr(0, eq), l.substr(eq + 1)});
+        }
+    }
+    void save(const fs::path& p) const {
+        std::ofstream f(p);
+        for (auto& [a, b] : kv) f << a << "=" << b << "\n";
+    }
+    coopnet::Relay relay() const {
+        coopnet::Relay r;
+        const std::string v = get("relay");
+        const size_t colon = v.rfind(':');
+        if (!v.empty()) r.host = v.substr(0, colon);
+        if (colon != std::string::npos) r.port = uint16_t(std::atoi(v.c_str() + colon + 1));
+        if (!r.port) r.port = coopnet::Relay{}.port;
+        return r;
+    }
+};
 
 struct Bokeh {
     float x, y, vx, vy, size, phase;
@@ -498,6 +558,15 @@ struct App {
     GameProcess hdJob, setupJob;
     Setup build;             // the game's code from the disc (SETUP page)
     bool needBuild = false;  // Setup::needed for the current disc
+    std::vector<std::string> pendingArgs;  // options for the game once the setup is done (co-op)
+    // CO-OP page: the link is made here first (both see each other before starting); the game makes
+    // its own with the same code when it starts.
+    coopnet::Link coopLink;
+    CoopIni coopIni;
+    std::string coopName, coopJoin;
+    std::string* editing = nullptr;  // the text row being typed into
+    size_t editMax = 0;
+    bool editUpper = false;
     std::mutex dialogLock;
     std::string dialogResult;
     bool dialogDone = false;
@@ -575,6 +644,7 @@ struct App {
             }
             label("play", [this] { launch(); },
                   needBuild ? "Start the game. First the game is built from your disc, once: about 10 to 20 minutes." : "Start the game.");
+            label("coop", [this] { openCoop(); }, "Play the story together online, each on your own screen. Co-op has its own save.");
             label("settings", [this] { go(Screen::Settings); }, "Display, frame rate, sound and disc options.");
             label("hdtex", [this] { go(Screen::Hd); }, "Make high-resolution textures from your disc with an upscaling model.");
             if (kMods) label("mods", [this] { mods = scanMods(dataDir / "mods"), go(Screen::Mods); }, "Turn installed mods on or off.");
@@ -609,7 +679,7 @@ struct App {
                 "Use the high-resolution textures made on the HD TEXTURES page.");
             row("Disc", [this] { return strU8(pathU8(cfg.disc).filename()); }, [this](int) { chooseDisc(); },
                 "The disc image the game is played from. Press to choose another.", [this] { chooseDisc(); });
-            label("back", [this] { cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 1); }, "Back to the main menu. Settings are saved.");
+            label("back", [this] { cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 2); }, "Back to the main menu. Settings are saved.");
         } else if (screen == Screen::Mods) {
             for (size_t i = 0; i < mods.size(); i++) {
                 v.push_back({"", [this, i] { return mods[i].name; }, [this, i] { return mods[i].on ? "On" : "Off"; },
@@ -620,7 +690,7 @@ struct App {
                              }});
                 v.back().activate = [c = v.back().change] { c(1); };
             }
-            label("back", [this] { go(Screen::Main, 3); }, "Back to the main menu.");
+            label("back", [this] { go(Screen::Main, 4); }, "Back to the main menu.");
         } else if (screen == Screen::Hd) {
             const HdStatus s = readHd(packDir());
             const bool alive = hdJob.running() || (s.fresh && (s.state == "running" || s.state == "paused"));
@@ -642,7 +712,33 @@ struct App {
                              [this](int) { cfg.hdTextures = !cfg.hdTextures, cfg.save(dataDir / "launcher.ini"); },
                              [this] { cfg.hdTextures = !cfg.hdTextures, cfg.save(dataDir / "launcher.ini"); },
                              [] { return std::string("Play with the HD textures or the originals."); }});
-            label("back", [this] { go(Screen::Main, 2); }, "Back to the main menu.");
+            label("back", [this] { go(Screen::Main, 3); }, "Back to the main menu.");
+        } else if (screen == Screen::Coop) {
+            auto row = [&](std::string n, std::function<std::string()> val, std::string help, std::function<void()> act) {
+                v.push_back({"", [n] { return n; }, val, nullptr, act, [help] { return help; }});
+            };
+            const coopnet::State st = coopLink.state();
+            const bool linked = st != coopnet::State::Off;
+            row("Your name", [this] { return editText(coopName); }, "The name your partner sees. Press to type it.",
+                [this] { beginEdit(&coopName, 24, false); });
+            if (!linked || coopLink.host())
+                row("Host a game", [this] { return coopLink.host() && coopLink.state() != coopnet::State::Off ? "Code: " + coopLink.code() : std::string(""); },
+                    "Makes a code for your partner to join with. You play the story's character (Sonic's side in the Hero story).",
+                    [this] { startCoop(true, coopnet::newCode()); });
+            if (!linked || !coopLink.host())
+                row("Join with a code", [this] { return editText(coopJoin, "Type the code"); },
+                    "Type your partner's code, then press Enter. You play the other side's character.", [this] {
+                        if (editing == &coopJoin) return endEdit();
+                        beginEdit(&coopJoin, 6, true);
+                    });
+            if (linked) {
+                row("Status", [this] { return coopStatus(); }, "Your link to your partner, through the relay server.", nullptr);
+                v.back().activate = nullptr;
+                row("Stop", [] { return std::string(""); }, "Leave this co-op game.", [this] { coopLink.stop(); });
+            }
+            if (linked && st == coopnet::State::Connected)
+                label("play", [this] { launchCoop(); }, "Start the game together. Co-op plays on its own save, apart from your game.");
+            label("back", [this] { endEdit(), go(Screen::Main, 1); }, "Back to the main menu.");
         } else if (screen == Screen::Setup) {
             const Setup::Status s = build.status();
             if (s.running) {
@@ -677,6 +773,72 @@ struct App {
             this, win, filters, 2, cfg.disc.empty() ? nullptr : cfg.disc.c_str(), false);
     }
 
+    // ---- CO-OP page ----
+    void openCoop() {
+        coopIni.load(dataDir / "coop.ini");
+        const char* user = std::getenv("USERNAME");
+        coopName = coopIni.get("name", user && *user ? std::string(user).substr(0, 24) : "Player");
+        coopJoin = coopIni.get("last_code");
+        go(Screen::Coop);
+    }
+    void startCoop(bool host, const std::string& code) {
+        if (!host) coopIni.set("last_code", code);
+        coopIni.set("name", coopName);
+        coopIni.save(dataDir / "coop.ini");
+        coopLink.start(host, code, coopName, coopIni.relay());
+    }
+    std::string coopStatus() const {
+        const coopnet::State st = coopLink.state();
+        if (st == coopnet::State::Connected) {
+            std::string s = "With " + coopLink.partnerName();
+            if (coopLink.pingMs() >= 0) s += ", " + std::to_string(coopLink.pingMs()) + " ms";
+            return s;
+        }
+        std::string s = coopnet::stateName(st);
+        if (st == coopnet::State::Failed && !coopLink.error().empty()) s += ": " + coopLink.error();
+        return s;
+    }
+    void launchCoop() {
+        const bool host = coopLink.host();
+        const std::string code = coopLink.code();
+        coopLink.stop();  // the game makes its own link, with the same code
+        launch({host ? "--coop-host" : "--coop-join", code, "--coop-name", coopName});
+    }
+    // typing into a text row
+    std::string editText(const std::string& s, const char* empty = "") const {
+        if (editing == &s) return s + ((int(t * 2) & 1) ? "_" : " ");
+        return s.empty() ? empty : s;
+    }
+    void beginEdit(std::string* s, size_t max, bool upper) {
+        editing = s, editMax = max, editUpper = upper;
+        SDL_StartTextInput(win);
+    }
+    void typed(const char* text) {
+        if (!editing) return;
+        for (const char* p = text; *p; p++) {
+            char ch = *p;
+            if (uint8_t(ch) < 0x20 || uint8_t(ch) >= 0x7F || editing->size() >= editMax) continue;
+            if (editUpper && ch >= 'a' && ch <= 'z') ch = char(ch - 'a' + 'A');
+            *editing += ch;
+        }
+    }
+    void endEdit() {
+        if (!editing) return;
+        std::string* was = editing;
+        editing = nullptr;
+        SDL_StopTextInput(win);
+        if (was == &coopName) {
+            if (coopName.empty()) coopName = "Player";
+            coopIni.set("name", coopName);
+            coopIni.save(dataDir / "coop.ini");
+        } else if (was == &coopJoin && !coopJoin.empty()) {
+            const std::string code = coopnet::cleanCode(coopJoin);
+            if (code.empty()) return say("That's not a code: codes are six letters and digits.");
+            coopJoin = code;
+            startCoop(false, code);
+        }
+    }
+
     void startBuild() {
         go(Screen::Setup);
         build.start(exeDir, pathU8(cfg.disc), dataDir / "setup.log");
@@ -688,14 +850,16 @@ struct App {
         if (!s.done) return;
         needBuild = Setup::needed(exeDir, pathU8(cfg.disc));
         go(Screen::Main, 0);
-        if (!needBuild) launch();
+        if (!needBuild) launch(pendingArgs);
     }
 
-    void launch() {
+    // Starts the game; `extra`: more options (co-op), kept through a first-run setup.
+    void launch(const std::vector<std::string>& extra = {}) {
         const fs::path exe = exeDir / "sa2b.exe";
         std::error_code ec;
         if (!fs::exists(exe, ec)) return say("sa2b.exe isn't next to the launcher.");
         needBuild = Setup::needed(exeDir, pathU8(cfg.disc));
+        pendingArgs = extra;
         if (needBuild) return startBuild();
         std::vector<std::string> a = {"--iso", cfg.disc, "--volume", std::to_string(cfg.volume)};
         if (cfg.fullscreen) a.push_back("--fullscreen");
@@ -705,6 +869,8 @@ struct App {
         if (cfg.fastDisc) a.push_back("--fast-disc");
         if (cfg.hdTextures && packReady()) a.push_back("--hd-textures"), a.push_back(strU8(packDir()));
         if (kMods && std::any_of(mods.begin(), mods.end(), [](const Mod& m) { return m.on; })) a.push_back("--mods");
+        a.insert(a.end(), extra.begin(), extra.end());
+        pendingArgs.clear();
         cfg.save(dataDir / "launcher.ini");
         std::string err;
         if (!game.start(exe, a, dataDir, err)) return say("The game didn't start: " + err + ".");
@@ -781,10 +947,13 @@ struct App {
         if (sel < int(v.size()) && v[size_t(sel)].activate) v[size_t(sel)].activate();
     }
     void cancel() {
-        if (screen == Screen::Settings) cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 1);
-        else if (screen == Screen::Hd) go(Screen::Main, 2);
-        else if (screen == Screen::Mods) go(Screen::Main, 3);
-        else if (screen == Screen::Setup) {
+        if (screen == Screen::Settings) cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 2);
+        else if (screen == Screen::Hd) go(Screen::Main, 3);
+        else if (screen == Screen::Mods) go(Screen::Main, 4);
+        else if (screen == Screen::Coop) {
+            if (editing) endEdit();
+            else go(Screen::Main, 1);
+        } else if (screen == Screen::Setup) {
             if (build.running()) build.cancel();
             else go(Screen::Main, 0);
         }
@@ -891,6 +1060,7 @@ struct App {
                             : screen == Screen::Hd     ? "hdtex"
                             : screen == Screen::Mods   ? "mods"
                             : screen == Screen::Setup  ? "setup"
+                            : screen == Screen::Coop   ? "coop"
                                                        : nullptr;
         if (title) {
             Tex& tx = label(title);
@@ -1127,6 +1297,7 @@ int main(int argc, char** argv) {
     }
     if (shot) {
         app.go(shotPage == "settings" ? Screen::Settings : shotPage == "hd" ? Screen::Hd : shotPage == "mods" ? Screen::Mods : Screen::Main);
+        if (shotPage == "coop") app.openCoop();
         if (shotPage == "setup") {  // a real build, taken a third of the way into compiling (then stopped)
             app.startBuild();
             for (;;) {
@@ -1158,6 +1329,17 @@ int main(int argc, char** argv) {
         while (SDL_PollEvent(&e)) {
             if (app.gameRunning) continue;
             SDL_ConvertEventToRenderCoordinates(g_ren, &e);
+            if (app.editing) {  // typing into a text row: keys are text; Enter or Esc ends it
+                if (e.type == SDL_EVENT_TEXT_INPUT) {
+                    app.typed(e.text.text);
+                    continue;
+                }
+                if (e.type == SDL_EVENT_KEY_DOWN) {
+                    if (e.key.key == SDLK_BACKSPACE && !app.editing->empty()) app.editing->pop_back();
+                    else if (e.key.key == SDLK_RETURN || e.key.key == SDLK_KP_ENTER || e.key.key == SDLK_ESCAPE) app.endEdit();
+                    continue;
+                }
+            }
             switch (e.type) {
             case SDL_EVENT_QUIT: app.quit = true; break;
             case SDL_EVENT_KEY_DOWN:
@@ -1222,8 +1404,10 @@ int main(int argc, char** argv) {
                 SDL_Delay(100);
                 continue;
             }
-            app.gameRunning = false;
             const unsigned long code = app.game.exitCode();
+            // The game started itself again as a co-op session (src/runtime/coop.cpp): wait for that one.
+            if (code == 0x5A2B && app.game.adoptChild()) continue;
+            app.gameRunning = false;
             if (code != 0) app.say("The game closed unexpectedly (code " + std::to_string(code) + "). Its log is sa2b.log.");
             SDL_ShowWindow(app.win);
             SDL_RaiseWindow(app.win);

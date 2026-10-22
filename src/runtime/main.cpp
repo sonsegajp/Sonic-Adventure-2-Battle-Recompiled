@@ -2,6 +2,7 @@
 // would leave behind, and run the recompiled __start.
 //   sa2b --iso <disc image> [--dol <main.dol>] [--headless] [--mute] [--volume 0-100] [--frames N] [--trace]
 // (without --dol the program is read from the disc, as the console's apploader does)
+#include "runtime/coop.h"
 #include "runtime/interp.h"
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
@@ -107,6 +108,10 @@ int main(int argc, char** argv) {
     // Played sessions keep their log (sa2b.log, replaced at each start); test runs (headless) capture
     // the console instead and leave it alone.
     if (!headless) logToFile("sa2b.log");
+    // Online co-op (--coop-host/--coop-join: its own memory card, so before the card is first used)
+    // and Discord Rich Presence.
+    coop::init(argc, argv);
+    if (!headless) discord::start();
     installCrashHandler();
     audioInit(!headless && !mute, volume);  // headless runs are always silent
     if (!memInit()) return std::fprintf(stderr, "out of memory\n"), 1;
@@ -135,6 +140,7 @@ int main(int argc, char** argv) {
     if (mods) modsInit();
     interpInit();
     gameFixesInit();
+    if (coop::active()) coop::gameInit();  // the partner as player 2 in the stages
     if (const char* w = std::getenv("SA2_WATCH")) {  // SA2_WATCH=<hex address>[:<length>]
         const char* colon = std::strchr(w, ':');
         installWatch(u32(std::strtoul(w, nullptr, 16)), colon ? u32(std::strtoul(colon + 1, nullptr, 0)) : 4);

@@ -4,6 +4,7 @@
 // Debug/automation: --headless renders with the window hidden; SA2_DUMP_DIR=<dir> writes every
 // SA2_DUMP_EVERY-th frame (from SA2_DUMP_FROM on) as raw RGBA (tools/rgba2png.py converts it);
 // --frames N exits after N.
+#include "runtime/coop.h"
 #include "runtime/gx.h"
 #include "runtime/runtime.h"
 #include "runtime/sched.h"
@@ -719,6 +720,7 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
                 }
             }
         }
+        if (!headless) coop::overlay();  // the F1 menu and co-op notices, over the picture
         aurora_end_frame();
         s_tEnd += gxNow() - c2;
         if (newFrame && (presented % 300 == 0 || presented == 30)) {

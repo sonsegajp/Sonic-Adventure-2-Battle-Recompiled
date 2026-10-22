@@ -15,6 +15,11 @@ target_include_directories(sa2_recompiler PUBLIC src)
 add_executable(sa2recompile tools/recomp/sa2recompile.cpp)
 target_link_libraries(sa2recompile PRIVATE sa2_recompiler)
 
+# Online co-op's link to the partner through the relay (docs/COOP.md): the game and the launcher.
+add_library(sa2_coopnet STATIC src/net/coopnet.cpp)
+target_include_directories(sa2_coopnet PUBLIC src)
+target_link_libraries(sa2_coopnet PUBLIC ws2_32)
+
 # ---- Aurora: GX renderer (WebGPU/Dawn), window, controllers (extern/aurora, MIT) ---------------
 # The disc is read by our own DVD layer and saves will go through our CARD layer, so Aurora's DVD
 # (nod) and CARD components are off.
@@ -69,7 +74,7 @@ add_executable(sa2b_launcher WIN32 src/launcher/main.cpp src/launcher/disc.cpp s
 set_target_properties(sa2b_launcher PROPERTIES OUTPUT_NAME "SA2BLauncher")
 target_include_directories(sa2b_launcher PRIVATE src ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(sa2b_launcher PRIVATE SA2B_VERSION="${PROJECT_VERSION}")
-target_link_libraries(sa2b_launcher PRIVATE ${AURORA_SDL3_TARGET} sa2_recompiler)
+target_link_libraries(sa2b_launcher PRIVATE ${AURORA_SDL3_TARGET} sa2_recompiler sa2_coopnet)
 if (WIN32)
     add_custom_command(TARGET sa2b_launcher POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b_launcher> $<TARGET_FILE_DIR:sa2b_launcher>
@@ -84,7 +89,7 @@ target_include_directories(sa2b PRIVATE src)
 target_compile_options(sa2b PRIVATE /EHsc)
 # The game module imports the runtime's functions (RT_API, src/runtime/ctx.h): sa2b.lib.
 set_target_properties(sa2b PROPERTIES ENABLE_EXPORTS ON)
-target_link_libraries(sa2b PRIVATE aurora::core aurora::gx aurora::vi aurora::pad aurora::mtx)
+target_link_libraries(sa2b PRIVATE aurora::core aurora::gx aurora::vi aurora::pad aurora::mtx sa2_coopnet)
 # The GX bridge feeds Aurora's command FIFO directly (internal headers).
 target_include_directories(sa2b PRIVATE ${CMAKE_SOURCE_DIR}/extern/aurora/lib)
 if (WIN32)
