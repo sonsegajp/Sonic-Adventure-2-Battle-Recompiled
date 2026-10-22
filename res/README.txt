@@ -1,5 +1,5 @@
-SA2B Recompiled
-===============
+Sonic Adventure 2 Battle: Recompiled
+====================================
 
 A native PC version of Sonic Adventure 2: Battle (GameCube, USA), made by static recompilation.
 No game data is included: you need your own copy of the game, a USA disc image (GSNE8P, .iso/.gcm).
@@ -20,7 +20,7 @@ HD textures (optional)
   downloaded into %LOCALAPPDATA%\SA2BRecompiled: about 3 GB with an NVIDIA card), then Make HD
   textures. About 10-20 minutes with a graphics card; it can run while you play.
 
-Source code, issues: https://github.com/sonsegajp/SA2BRE
+Source code, issues: https://github.com/sonsegajp/Sonic-Adventure-2-Battle-Recompiled
 
 Sonic Adventure 2: Battle is (c) SEGA. This project is not affiliated with or endorsed by SEGA or
 Nintendo.

@@ -1,4 +1,4 @@
-# SA2B Recompiled
+# Sonic Adventure 2 Battle: Recompiled
 
 A native PC version of **Sonic Adventure 2: Battle** (GameCube, USA), made by static recompilation:
 the game's PowerPC code is translated to C++ ahead of time and runs natively, with its own runtime in
@@ -41,7 +41,7 @@ alone, and can run while you play; the game uses the textures once all are done.
 Windows, Visual Studio 2022 (clang-cl), CMake and Ninja, Python 3.
 
 ```
-git clone --recursive https://github.com/sonsegajp/SA2BRE
+git clone --recursive https://github.com/sonsegajp/Sonic-Adventure-2-Battle-Recompiled
 python tools/extract.py "<your disc image>"          # orig/: main.dol and the REL modules
 build/windows-clang/sa2recompile.exe --dol orig/main.dol --rels orig/rel --names config/GSNE8P/names.txt --patches config/GSNE8P/patchpoints.txt --out build/gen
 powershell -File tools/build.ps1                     # sa2b.exe and SA2BLauncher.exe

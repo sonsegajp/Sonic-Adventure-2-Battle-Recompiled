@@ -378,7 +378,7 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
     }
     if (!winW || !winH) winW = 1280, winH = widescreen ? 720 : 960;
     const AuroraConfig cfg{
-        .appName = "SA2B Recompiled",
+        .appName = "Sonic Adventure 2 Battle: Recompiled",
         .vsync = vsync,
         .startFullscreen = fullscreen,
         .windowWidth = winW,
