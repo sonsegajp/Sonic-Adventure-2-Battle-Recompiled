@@ -21,3 +21,6 @@ tools/hd/models/
 tools/hd/download/
 tools/hd/setup_status.txt
 dist/
+# Assistant notes stay local
+CLAUDE.md
+.claude/
