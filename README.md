@@ -7,6 +7,15 @@ place of the console's hardware. No emulator.
 **No game data is included.** You need your own copy of the game (USA disc image, `GSNE8P`); the
 launcher reads everything from it.
 
+![The launcher](docs/launcher_main.png)
+
+<p>
+  <img src="docs/launcher_settings.png" width="49%" alt="Launcher settings">
+  <img src="docs/launcher_hd.png" width="49%" alt="Launcher HD textures">
+</p>
+
+The launcher is drawn with the game's own menu art, lights and message font, read from your disc.
+
 ## Features
 
 - Story, stage select, Chao World, kart races, bosses, 2P battle and memory card saves
