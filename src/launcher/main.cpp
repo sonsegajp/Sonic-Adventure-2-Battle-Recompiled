@@ -515,17 +515,18 @@ struct App {
         if (disc.read("alphaTitle_e.prs", raw)) {
             std::vector<Image> t = gvrTextures(prsDecompress(raw));
             if (t.size() >= 12) {
-                // the title's art: two 640x512 halves, each a 512x512 and two 128x256 strips; the
-                // second half (Sonic, Shadow) is the left one
+                // the title's art, as its screen draws it: a 640-wide column of two 640x512 halves
+                // one above the other (each a 512x512 and, to its right, two 128x256 strips),
+                // scrolling upwards round and round
                 Image p;
-                p.w = 1280, p.h = 512;
+                p.w = 640, p.h = 1024;
                 p.rgba.assign(size_t(p.w) * p.h * 4, 0);
                 auto blit = [&](const Image& s, int ox, int oy) {
                     for (int y = 0; y < s.h && oy + y < p.h; y++)
                         std::memcpy(&p.rgba[(size_t(oy + y) * p.w + ox) * 4], &s.rgba[size_t(y) * s.w * 4], size_t(std::min(s.w, p.w - ox)) * 4);
                 };
-                blit(t[6], 0, 0), blit(t[7], 512, 0), blit(t[8], 512, 256);
-                blit(t[3], 640, 0), blit(t[4], 1152, 0), blit(t[5], 1152, 256);
+                blit(t[3], 0, 0), blit(t[4], 512, 0), blit(t[5], 512, 256);
+                blit(t[6], 0, 512), blit(t[7], 512, 512), blit(t[8], 512, 768);
                 pano = makeTex(p);
                 logo = makeTex(t[2]);
                 for (int k = 0; k < 3; k++) bokeh[k] = makeTex(t[9 + k]);
@@ -767,15 +768,12 @@ struct App {
     // ---- frame ----
     void drawBackground(float dt) {
         fill({0, 0, kW, kH}, {0.01f, 0.01f, 0.04f, 1});
-        if (pano) {
-            const float sc = kH * 1.08f / pano.h, pw = pano.w * sc;
-            const float off = (std::sin(t * 0.025f) * 0.5f + 0.5f) * (pw - kW);
-            draw(pano, {-off, -kH * 0.04f, pw, pano.h * sc}, 0.30f, 0.30f, 0.34f, 1);
+        if (pano) {  // the menus' darkened title art: the full width, scrolling up 120 units a second
+            const float sc = kW / pano.w, ph = pano.h * sc;
+            const float y = -std::fmod(t * 120.f * sc, ph);
+            for (float yy = y; yy < kH; yy += ph) draw(pano, {0, yy, kW, ph}, 0.08f, 0.08f, 0.08f, 1);  // as dark as the main menu shows it
         }
-        // the menus' blue-to-red wash, darker at the top and bottom
-        gradient({0, 0, kW, kH}, {0.0f, 0.10f, 0.45f, 0.38f}, {0.45f, 0.02f, 0.08f, 0.38f}, {0.45f, 0.02f, 0.08f, 0.38f}, {0.0f, 0.10f, 0.45f, 0.38f});
-        gradient({0, 0, kW, 160}, {0, 0, 0, 0.55f}, {0, 0, 0, 0.55f}, {0, 0, 0, 0}, {0, 0, 0, 0});
-        gradient({0, kH - 200, kW, 200}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0.6f}, {0, 0, 0, 0.6f});
+        gradient({0, kH - 160, kW, 160}, {0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0.45f}, {0, 0, 0, 0.45f});
         for (Bokeh& b : lights) {
             b.x += b.vx * dt, b.y += b.vy * dt;
             if (b.y < -b.size) b.y = kH + b.size, b.x = float(std::rand() % int(kW));

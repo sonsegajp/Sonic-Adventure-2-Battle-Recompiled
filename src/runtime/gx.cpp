@@ -581,10 +581,10 @@ void place2D(const u8* p, u32 count, u32 fmt) {
                     chain += b;
                 }
             }
-            log("[wide] %llu %s draw: x %.0f..%.0f y %.0f..%.0f z %.2f..%.2f, %u verts, mtx %u [%.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g], zmode %x, tex %u%s -> %d; stack%s\n",
+            log("[wide] %llu %s draw: x %.0f..%.0f y %.0f..%.0f z %.2f..%.2f, %u verts, mtx %u [%.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g | %.4g %.4g %.4g %.4g], zmode %x, tex %u @%08X%s -> %d; stack%s\n",
                 (unsigned long long)s_frames, ortho ? "ortho" : "persp", minx, maxx, miny, maxy, minz, maxz, count, m / 4,
                 xff(m), xff(m + 1), xff(m + 2), xff(m + 3), xff(m + 4), xff(m + 5), xff(m + 6), xff(m + 7), xff(m + 8),
-                xff(m + 9), xff(m + 10), xff(m + 11), s_zmode, s_genMode & 0xF, s_copyDests.count(s_tex0) ? " (copy)" : "", place,
+                xff(m + 9), xff(m + 10), xff(m + 11), s_zmode, s_genMode & 0xF, s_tex0, s_copyDests.count(s_tex0) ? " (copy)" : "", place,
                 chain.c_str());
         }
     }
