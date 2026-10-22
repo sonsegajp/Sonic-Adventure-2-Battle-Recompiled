@@ -11,6 +11,7 @@
 // into one. Jump tables (cmplwi/lis/addi/lwzx/mtctr/bctr) stay inside their function as a switch.
 #include "recompiler/image.h"
 
+#include <functional>
 #include <map>
 #include <set>
 #include <string>
@@ -50,7 +51,8 @@ struct Program {
 };
 
 // Discovers functions in every module (RELs first, so their calls into main.dol seed it).
-void analyze(Program& p);
+// `progress`, if given, is told how far it is (0-1) as each module is done.
+void analyze(Program& p, const std::function<void(float)>& progress = {});
 
 // Applies a names file: "<address> <name> [lib]" per line (main.dol addresses). Functions whose lib
 // is one of the replaced SDK libraries are marked hle.

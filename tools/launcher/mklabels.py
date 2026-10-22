@@ -26,6 +26,9 @@ LABELS = [
     ('quit', 'QUIT', 'Bd', 92),
     ('choosedisc', 'CHOOSE DISC', 'Bd', 92),
     ('back', 'BACK', 'Bd', 92),
+    ('setup', 'SETUP', 'Bd', 92),
+    ('cancel', 'CANCEL', 'Bd', 92),
+    ('tryagain', 'TRY AGAIN', 'Bd', 92),
     ('nodisc', 'Choose your Sonic Adventure 2: Battle disc image to begin.', 'Rg', 44),
     ('wrongdisc', 'That file is not Sonic Adventure 2: Battle (USA). Choose another.', 'Rg', 44),
 ]

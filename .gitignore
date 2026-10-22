@@ -21,6 +21,10 @@ tools/hd/models/
 tools/hd/download/
 tools/hd/setup_status.txt
 dist/
+# The game module and what the setup leaves: built from the player's disc, never committed
+sa2b_game.dll
+sa2b_game.txt
+setup_work/
 # Assistant notes stay local
 CLAUDE.md
 .claude/

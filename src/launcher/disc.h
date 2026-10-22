@@ -25,15 +25,22 @@ public:
     std::string gameId() const;  // e.g. GSNE8P
     std::string title() const;   // the name in the disc header
     bool read(const std::string& name, Bytes& out);  // a file by its path on the disc
+    struct File {
+        std::string path;  // "dir/name"
+        uint32_t offset, size;
+    };
+    std::vector<File> files() const;                  // every file, in the disc's order
+    bool readAt(uint64_t offset, void* dst, size_t size);
+    bool readDol(Bytes& out);                         // main.dol (its size: where its last section ends)
 
 private:
-    bool readAt(uint64_t offset, void* dst, size_t size);
     std::ifstream m_file;
     Bytes m_header, m_fst;
     bool m_open = false;
 };
 
-Bytes prsDecompress(const Bytes& src);
+// (stops once `limit` bytes are out: a header's worth is enough to tell what a file is)
+Bytes prsDecompress(const Bytes& src, size_t limit = SIZE_MAX);
 // Every GVR texture in a blob (a GVM archive or a lone GVR), in order; undecodable ones come back
 // empty so indices still match the archive's.
 std::vector<Image> gvrTextures(const Bytes& blob);

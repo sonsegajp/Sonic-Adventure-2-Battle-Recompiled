@@ -1,7 +1,6 @@
 // Developer CLI for the recompiler: sa2recompile --dol main.dol --rels <dir> [--names f] [--funcs out.tsv]
 // [--out dir]. The shipped program runs the same code in-process at first-run setup.
-#include "recompiler/analyze.h"
-#include "recompiler/emit.h"
+#include "recompiler/build.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -34,46 +33,24 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "usage: sa2recompile --dol main.dol [--rels dir] [--funcs out.tsv]\n");
         return 2;
     }
+    Input in;
+    if (!readFile(dolPath, in.dol)) return std::fprintf(stderr, "can't read %s\n", dolPath.c_str()), 1;
+    if (!relDir.empty())
+        for (auto& e : std::filesystem::directory_iterator(relDir)) {
+            if (e.path().extension() != ".rel") continue;
+            in.rels.emplace_back(e.path().filename().string(), std::vector<u8>());
+            if (!readFile(e.path(), in.rels.back().second)) return std::fprintf(stderr, "can't read %s\n", e.path().string().c_str()), 1;
+        }
+    auto readText = [](const std::string& p) {
+        std::ifstream f(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), {});
+    };
+    if (!namesPath.empty()) in.names = readText(namesPath);
+    if (!patchesPath.empty()) in.patches = readText(patchesPath);
     Program prog;
-    std::string err;
-    std::vector<u8> data;
-    if (!readFile(dolPath, data)) return std::fprintf(stderr, "can't read %s\n", dolPath.c_str()), 1;
-    prog.modules.emplace_back();
-    if (!loadDol(data, prog.modules.back(), err)) return std::fprintf(stderr, "%s\n", err.c_str()), 1;
-    if (!relDir.empty()) {
-        std::vector<std::filesystem::path> rels;
-        for (auto& e : std::filesystem::directory_iterator(relDir))
-            if (e.path().extension() == ".rel") rels.push_back(e.path());
-        std::sort(rels.begin(), rels.end());
-        for (auto& p : rels) {
-            if (!readFile(p, data)) return std::fprintf(stderr, "can't read %s\n", p.string().c_str()), 1;
-            Module m;
-            if (!loadRel(data, p.filename().string(), m, err)) return std::fprintf(stderr, "%s\n", err.c_str()), 1;
-            // ChaoStgLobby.rel reuses ChaoMotionsD's id and nothing loads it: keep the first module per id.
-            if (prog.byId(m.id)) {
-                std::fprintf(stderr, "note: skipping %s (module id %u already used)\n", m.name.c_str(), m.id);
-                continue;
-            }
-            prog.modules.push_back(std::move(m));
-        }
-    }
-    analyze(prog);
-    // --patches <file>: main.dol addresses (hex, one per line, '#' comments) where native mod code
-    // can run (src/runtime/mods.cpp registers it by address).
-    if (!patchesPath.empty()) {
-        std::ifstream f(patchesPath);
-        for (std::string line; std::getline(f, line);) {
-            line = line.substr(0, line.find('#'));
-            if (line.find_first_not_of(" \t\r") == std::string::npos) continue;
-            const u32 a = u32(std::stoul(line, nullptr, 16));
-            if (!prog.patchPoints.count(a)) prog.patchPoints.emplace(a, int(prog.patchPoints.size()));
-        }
-    }
-    if (!namesPath.empty()) {
-        std::ifstream f(namesPath);
-        std::string text((std::istreambuf_iterator<char>(f)), {});
-        applyNames(prog, text, {"os", "gx", "vi", "pad", "si", "dvd", "ai", "ar", "arq", "dsp", "card", "exi", "ax", "db", "OdemuExi2", "amcstubs", "odenotstub", "TRK"});
-    }
+    std::string err, notes;
+    if (!buildProgram(in, prog, err, &notes)) return std::fprintf(stderr, "%s\n", err.c_str()), 1;
+    std::fputs(notes.c_str(), stderr);
     size_t totalF = 0, totalA = 0;
     u64 totalWords = 0, covered = 0;
     for (auto& mi : prog.info) {

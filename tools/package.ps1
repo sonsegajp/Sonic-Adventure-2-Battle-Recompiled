@@ -1,23 +1,39 @@
-# Assembles a release from the build: dist\SA2BRecompiled\ (the game, the launcher, their libraries,
-# the HD texture builder's scripts, readme and licences) and dist\SA2BRecompiled-<version>-windows-x64.zip.
-# Nothing of the game's data goes in: the launcher and the game read the player's own disc.
+# Assembles a release from the build: dist\SA2BRecompiled\ (the runtime, the launcher, their
+# libraries, the bundled compiler, the HD texture builder's scripts, readme and licences) and
+# dist\SA2BRecompiled-<version>-windows-x64.zip.
+# Nothing of the game goes in - neither its data nor its code, translated or not: the launcher builds
+# sa2b_game.dll from the player's own disc at first run (docs/SETUP.md), and the game reads the disc.
 #   tools\package.ps1 -Version 1.0.0
+# Needs build\llvm\clang.exe, lld-link.exe and LICENSE.TXT: from the official LLVM 19.1.5 release
+# (LLVM-19.1.5-win64.exe, unpacked with 7-Zip: bin\clang.exe, bin\lld-link.exe; llvm/LICENSE.TXT).
 param([string]$Version = "1.0.0")
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\windows-clang'
+$llvm = Join-Path $root 'build\llvm'
 $dist = Join-Path $root 'dist'
 $out = Join-Path $dist 'SA2BRecompiled'
+foreach ($f in 'clang.exe', 'lld-link.exe', 'LICENSE.TXT') {
+    if (-not (Test-Path (Join-Path $llvm $f))) { throw "build\llvm\$f is missing (see the top of this script)" }
+}
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
 New-Item -ItemType Directory -Force (Join-Path $out 'tools\hd') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $out 'tools\llvm') | Out-Null
 
-foreach ($f in 'sa2b.exe', 'SA2BLauncher.exe') { Copy-Item (Join-Path $bin $f) $out }
-Get-ChildItem $bin -Filter *.dll | ForEach-Object { Copy-Item $_.FullName $out }
+# the runtime and its import library (the game module links against it), the launcher
+foreach ($f in 'sa2b.exe', 'sa2b.lib', 'SA2BLauncher.exe') { Copy-Item (Join-Path $bin $f) $out }
+# their libraries - never the developer build's game module
+Get-ChildItem $bin -Filter *.dll | Where-Object { $_.Name -ne 'sa2b_game.dll' } | ForEach-Object { Copy-Item $_.FullName $out }
+foreach ($f in 'clang.exe', 'lld-link.exe', 'LICENSE.TXT') { Copy-Item (Join-Path $llvm $f) (Join-Path $out 'tools\llvm') }
 Copy-Item (Join-Path $root 'tools\prs.py') (Join-Path $out 'tools')
 foreach ($f in 'build_pack.py', 'upscale.py', 'gvr.py', 'setup.ps1') { Copy-Item (Join-Path $root "tools\hd\$f") (Join-Path $out 'tools\hd') }
 Copy-Item (Join-Path $root 'LICENSE.md') $out
 Copy-Item (Join-Path $root 'res\THIRD_PARTY_NOTICES.txt') $out
 Copy-Item (Join-Path $root 'res\README.txt') $out
+
+# nothing translated from the game, nothing generated from it
+$bad = Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match '^sa2b_game\.|\.obj$|^dol_|^rel_' }
+if ($bad) { throw "game code in the package: $($bad.Name -join ', ')" }
 
 $zip = Join-Path $dist "SA2BRecompiled-$Version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

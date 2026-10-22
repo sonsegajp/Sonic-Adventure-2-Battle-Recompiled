@@ -75,6 +75,8 @@ static void setupLowMem(const std::vector<u8>& discHeader) {
 namespace rt {
 void hostTimingInit();               // src/runtime/hosttime.cpp
 void logToFile(const char* path);    // src/runtime/cpu.cpp
+bool loadGameModule(bool quiet);     // src/runtime/game.cpp
+void gameModuleMemory();             // src/runtime/game.cpp
 }
 
 int main(int argc, char** argv) {
@@ -100,12 +102,15 @@ int main(int argc, char** argv) {
         else if (a == "--fast-disc") _putenv("SA2_FAST_DISC=1");  // read by the drive model (hle_dvd.cpp)
         else if (a == "--frames" && i + 1 < argc) maxFrames = std::strtoull(argv[++i], nullptr, 10);
     }
+    // The game's code: sa2b_game.dll, which the launcher builds from the player's disc.
+    if (!loadGameModule(headless)) return 1;
     // Played sessions keep their log (sa2b.log, replaced at each start); test runs (headless) capture
     // the console instead and leave it alone.
     if (!headless) logToFile("sa2b.log");
     installCrashHandler();
     audioInit(!headless && !mute, volume);  // headless runs are always silent
     if (!memInit()) return std::fprintf(stderr, "out of memory\n"), 1;
+    gameModuleMemory();
     std::vector<u8> dol;
     if (dolPath.empty() && !isoPath.empty()) {
         if (!readDiscDol(isoPath, dol)) return std::fprintf(stderr, "can't read the program from %s\n", isoPath.c_str()), 1;

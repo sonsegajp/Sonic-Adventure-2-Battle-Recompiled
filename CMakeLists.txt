@@ -1,14 +1,15 @@
 cmake_minimum_required(VERSION 3.25)
-project(sa2brecomp LANGUAGES C CXX VERSION 0.1)
+project(sa2brecomp LANGUAGES C CXX VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# The recompiler: main.dol + REL modules -> C++ (docs/PLAN.md). Linked into the developer CLI and,
-# later, into the shipped program for first-run setup.
+# The recompiler: main.dol + REL modules -> C++ (docs/PLAN.md). Linked into the developer CLI and
+# into the launcher, which runs it at first-run setup (docs/SETUP.md).
 add_library(sa2_recompiler STATIC
     src/recompiler/image.cpp
     src/recompiler/analyze.cpp
-    src/recompiler/emit.cpp)
+    src/recompiler/emit.cpp
+    src/recompiler/build.cpp)
 target_include_directories(sa2_recompiler PUBLIC src)
 
 add_executable(sa2recompile tools/recomp/sa2recompile.cpp)
@@ -56,44 +57,64 @@ if (WIN32)
         set(SA2_ICON_RC ${CMAKE_SOURCE_DIR}/res/sa2b.rc)
     endif ()
 endif ()
-add_executable(sa2b_launcher WIN32 src/launcher/main.cpp src/launcher/disc.cpp ${SA2_ICON_RC})
+# First-run setup builds the game module from the player's disc (src/launcher/setup.cpp): the files
+# it compiles the module with are embedded in the launcher.
+set(_embed_out ${CMAKE_BINARY_DIR}/generated/setup_files.inc)
+add_custom_command(OUTPUT ${_embed_out}
+    COMMAND ${CMAKE_COMMAND} -DOUT=${_embed_out} -DROOT=${CMAKE_SOURCE_DIR} -P ${CMAKE_SOURCE_DIR}/tools/launcher/embed.cmake
+    DEPENDS tools/launcher/embed.cmake src/runtime/ctx.h src/runtime/modules.h src/runtime/abi.h src/game/glue.cpp
+            config/GSNE8P/names.txt config/GSNE8P/patchpoints.txt
+    COMMENT "Embedding the game module's sources in the launcher")
+add_executable(sa2b_launcher WIN32 src/launcher/main.cpp src/launcher/disc.cpp src/launcher/setup.cpp ${_embed_out} ${SA2_ICON_RC})
 set_target_properties(sa2b_launcher PROPERTIES OUTPUT_NAME "SA2BLauncher")
-target_include_directories(sa2b_launcher PRIVATE src)
-target_link_libraries(sa2b_launcher PRIVATE ${AURORA_SDL3_TARGET})
+target_include_directories(sa2b_launcher PRIVATE src ${CMAKE_BINARY_DIR}/generated)
+target_compile_definitions(sa2b_launcher PRIVATE SA2B_VERSION="${PROJECT_VERSION}")
+target_link_libraries(sa2b_launcher PRIVATE ${AURORA_SDL3_TARGET} sa2_recompiler)
 if (WIN32)
     add_custom_command(TARGET sa2b_launcher POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b_launcher> $<TARGET_FILE_DIR:sa2b_launcher>
         COMMAND_EXPAND_LISTS)
 endif ()
 
-# ---- Developer build: runtime + the game recompiled at build time (sa2b) ----------------------
+# ---- The program (sa2b): the runtime. The game's code is not in it: it loads sa2b_game.dll, which
+# the launcher builds on the player's machine from their own disc (no translated code ships) -----
+file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS src/runtime/*.cpp src/modhost/*.cpp)
+add_executable(sa2b ${RUNTIME_SOURCES} ${SA2_ICON_RC})
+target_include_directories(sa2b PRIVATE src)
+target_compile_options(sa2b PRIVATE /EHsc)
+# The game module imports the runtime's functions (RT_API, src/runtime/ctx.h): sa2b.lib.
+set_target_properties(sa2b PROPERTIES ENABLE_EXPORTS ON)
+target_link_libraries(sa2b PRIVATE aurora::core aurora::gx aurora::vi aurora::pad aurora::mtx)
+# The GX bridge feeds Aurora's command FIFO directly (internal headers).
+target_include_directories(sa2b PRIVATE ${CMAKE_SOURCE_DIR}/extern/aurora/lib)
+if (WIN32)
+    add_custom_command(TARGET sa2b POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b> $<TARGET_FILE_DIR:sa2b>
+        COMMAND_EXPAND_LISTS)
+    # Dawn's D3D12 backend loads the shader compiler DLLs at run time.
+    file(GLOB _dawn_dx_dlls "${CMAKE_BINARY_DIR}/_deps/dawn_prebuilt-src/bin/dx*.dll")
+    if (_dawn_dx_dlls)
+        add_custom_command(TARGET sa2b POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dawn_dx_dlls} $<TARGET_FILE_DIR:sa2b>)
+    endif ()
+endif ()
+
+# ---- Developer build of the game module (sa2b_game.dll) from the recompiler's output -----------
 # Generate with: sa2recompile --dol orig/main.dol --rels orig/rel --names config/GSNE8P/names.txt
 #                --out build/gen      (nothing generated is ever committed)
+# Built the way the launcher builds it (src/launcher/setup.cpp): freestanding, no C library.
 set(SA2_GEN_DIR "${CMAKE_SOURCE_DIR}/build/gen" CACHE PATH "Recompiler output for the developer build")
 file(GLOB SA2_GEN_SOURCES CONFIGURE_DEPENDS ${SA2_GEN_DIR}/*.cpp)
 if (SA2_GEN_SOURCES)
-    file(GLOB RUNTIME_SOURCES CONFIGURE_DEPENDS src/runtime/*.cpp src/modhost/*.cpp)
-    add_executable(sa2b ${RUNTIME_SOURCES} ${SA2_GEN_SOURCES} ${SA2_ICON_RC})
-    target_include_directories(sa2b PRIVATE src ${SA2_GEN_DIR})
-    # Generated code: one big function per guest function with gotos; no debug info (it is huge),
-    # unwind tables so a guest thread can end by unwinding through it.
-    set_source_files_properties(${SA2_GEN_SOURCES} PROPERTIES COMPILE_OPTIONS
-        "/O2;/clang:-g0;/clang:-funwind-tables;-Wno-unused-label;-Wno-unused-variable;-Wno-unused-but-set-variable")
-    target_compile_options(sa2b PRIVATE /EHsc)
-    target_link_libraries(sa2b PRIVATE aurora::core aurora::gx aurora::vi aurora::pad aurora::mtx)
-    # The GX bridge feeds Aurora's command FIFO directly (internal headers).
-    target_include_directories(sa2b PRIVATE ${CMAKE_SOURCE_DIR}/extern/aurora/lib)
-    if (WIN32)
-        add_custom_command(TARGET sa2b POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b> $<TARGET_FILE_DIR:sa2b>
-            COMMAND_EXPAND_LISTS)
-        # Dawn's D3D12 backend loads the shader compiler DLLs at run time.
-        file(GLOB _dawn_dx_dlls "${CMAKE_BINARY_DIR}/_deps/dawn_prebuilt-src/bin/dx*.dll")
-        if (_dawn_dx_dlls)
-            add_custom_command(TARGET sa2b POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_dawn_dx_dlls} $<TARGET_FILE_DIR:sa2b>)
-        endif ()
-    endif ()
+    add_library(sa2b_game SHARED ${SA2_GEN_SOURCES} src/game/glue.cpp)
+    target_include_directories(sa2b_game PRIVATE src ${SA2_GEN_DIR})
+    target_compile_definitions(sa2b_game PRIVATE SA2B_GAME_DLL)
+    # Generated code: one big function per guest function with gotos; no debug info (it is huge).
+    target_compile_options(sa2b_game PRIVATE /O2 /clang:-g0 /clang:-ffreestanding /GS- /Zl /GR- /EHs-c-
+        -Wno-unused-label -Wno-unused-variable -Wno-unused-but-set-variable)
+    target_link_options(sa2b_game PRIVATE /NOENTRY /NODEFAULTLIB)
+    target_link_libraries(sa2b_game PRIVATE sa2b)
+    set_target_properties(sa2b_game PROPERTIES MSVC_RUNTIME_LIBRARY "")
 else ()
-    message(STATUS "No recompiler output in ${SA2_GEN_DIR}; skipping the sa2b developer build")
+    message(STATUS "No recompiler output in ${SA2_GEN_DIR}; skipping the developer build of sa2b_game.dll")
 endif ()

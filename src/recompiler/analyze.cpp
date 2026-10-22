@@ -422,13 +422,27 @@ std::string funcSymbol(const Module& m, u32 addr) {
     return buf;
 }
 
-void analyze(Program& p) {
+void analyze(Program& p, const std::function<void(float)>& progress) {
     p.info.assign(p.modules.size(), {});
+    // progress: each module's share is its code's size (scanning a fifth of the time, discovery the rest)
+    std::vector<double> code(p.modules.size(), 0);
+    double total = 0;
+    for (size_t i = 0; i < p.modules.size(); i++) {
+        for (const auto& s : p.modules[i].sections)
+            if (s.exec) code[i] += s.size;
+        total += code[i];
+    }
+    double done = 0;
+    auto report = [&](double part) {
+        done += part;
+        if (progress && total > 0) progress(float(done / total));
+    };
     std::map<u32, Scan> scans;
-    for (const auto& m : p.modules) scanModule(m, scans);
+    for (size_t i = 0; i < p.modules.size(); i++) scanModule(p.modules[i], scans), report(0.2 * code[i]);
     for (size_t i = 0; i < p.modules.size(); i++) {
         p.info[i].mod = &p.modules[i];
         discover(p.info[i], scans[p.modules[i].id]);
+        report(0.8 * code[i]);
     }
 }
 

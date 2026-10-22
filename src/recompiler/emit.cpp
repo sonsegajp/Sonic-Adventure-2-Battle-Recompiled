@@ -716,7 +716,7 @@ std::string emitFunction(const Program& p, const ModuleInfo& mi, const Func& f, 
 const char* kPrelude =
     "// Generated from the user's own disc by the SA2B recompiler. Never commit.\n"
     "#include \"runtime/ctx.h\"\n"
-    "namespace rt {\nextern HleFn g_hooks[];\nextern u8 g_fnOverride[];\nvoid runOverride(Ctx& c, u32 slot);\n}\n";
+    "namespace rt {\nextern HleFn g_hooks[];\nextern u8 g_fnOverride[];\n}\n";
 // Declared only where used, so adding a patch point rebuilds just the files it touches.
 const char* kPatchDecl = "namespace rt {\nusing PatchFn = bool (*)(Ctx&);\nextern PatchFn g_patchPoints[];\n}\n";
 

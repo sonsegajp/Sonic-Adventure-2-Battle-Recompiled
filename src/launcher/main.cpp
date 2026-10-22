@@ -6,8 +6,12 @@
 //
 // Files, in the data folder (the first of the working folder, the launcher's folder and the one two
 // above it that has saves/ or launcher.ini; else the launcher's): launcher.ini (settings),
-// mods/enabled.txt (mods turned on), textures/GSNE8P (the HD texture pack).
+// mods/enabled.txt (mods turned on), textures/GSNE8P (the HD texture pack), setup.log.
+//
+// The game's code is not shipped: on the first PLAY (and after an update or a change of disc) the
+// SETUP page builds it from the player's disc (setup.h, docs/SETUP.md).
 #include "launcher/disc.h"
+#include "launcher/setup.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
@@ -454,9 +458,15 @@ std::string fmtTime(long s) {
     else std::snprintf(b, sizeof b, "%ld min", std::max(1L, s / 60));
     return b;
 }
+std::string fmtClock(float seconds) {  // time so far, m:ss
+    char b[32];
+    const long s = long(seconds);
+    std::snprintf(b, sizeof b, "%ld:%02ld", s / 60, s % 60);
+    return b;
+}
 
 // ---- the app ----
-enum class Screen { Main, Settings, Hd, Mods };
+enum class Screen { Main, Settings, Hd, Mods, Setup };
 
 struct Bokeh {
     float x, y, vx, vy, size, phase;
@@ -486,6 +496,8 @@ struct App {
     bool gameRunning = false;
     std::vector<Mod> mods;
     GameProcess hdJob, setupJob;
+    Setup build;             // the game's code from the disc (SETUP page)
+    bool needBuild = false;  // Setup::needed for the current disc
     std::mutex dialogLock;
     std::string dialogResult;
     bool dialogDone = false;
@@ -537,6 +549,7 @@ struct App {
             if (t.size() > 6) bars = makeTex(t[6]);
         }
         if (font.load(disc)) text.build(font);
+        needBuild = Setup::needed(exeDir, pathU8(cfg.disc));
     }
     bool discOk() const { return disc.isOpen() && discError.empty() && text.atlas; }
 
@@ -560,7 +573,8 @@ struct App {
                 label("quit", [this] { quit = true; }, "");
                 return v;
             }
-            label("play", [this] { launch(); }, "Start the game.");
+            label("play", [this] { launch(); },
+                  needBuild ? "Start the game. First the game is built from your disc, once: about 10 to 20 minutes." : "Start the game.");
             label("settings", [this] { go(Screen::Settings); }, "Display, frame rate, sound and disc options.");
             label("hdtex", [this] { go(Screen::Hd); }, "Make high-resolution textures from your disc with an upscaling model.");
             if (kMods) label("mods", [this] { mods = scanMods(dataDir / "mods"), go(Screen::Mods); }, "Turn installed mods on or off.");
@@ -629,6 +643,14 @@ struct App {
                              [this] { cfg.hdTextures = !cfg.hdTextures, cfg.save(dataDir / "launcher.ini"); },
                              [] { return std::string("Play with the HD textures or the originals."); }});
             label("back", [this] { go(Screen::Main, 2); }, "Back to the main menu.");
+        } else if (screen == Screen::Setup) {
+            const Setup::Status s = build.status();
+            if (s.running) {
+                label("cancel", [this] { build.cancel(); }, "Stop building. Nothing is kept: it starts over the next time you press PLAY.");
+            } else if (!s.done) {
+                label("tryagain", [this] { startBuild(); }, "Start the setup again.");
+                label("back", [this] { go(Screen::Main, 0); }, "Back to the main menu.");
+            }
         }
         return v;
     }
@@ -655,10 +677,26 @@ struct App {
             this, win, filters, 2, cfg.disc.empty() ? nullptr : cfg.disc.c_str(), false);
     }
 
+    void startBuild() {
+        go(Screen::Setup);
+        build.start(exeDir, pathU8(cfg.disc), dataDir / "setup.log");
+    }
+    // Each frame on the SETUP page: once the build is done, the game starts.
+    void pollBuild() {
+        if (screen != Screen::Setup || build.running()) return;
+        const Setup::Status s = build.status();
+        if (!s.done) return;
+        needBuild = Setup::needed(exeDir, pathU8(cfg.disc));
+        go(Screen::Main, 0);
+        if (!needBuild) launch();
+    }
+
     void launch() {
         const fs::path exe = exeDir / "sa2b.exe";
         std::error_code ec;
         if (!fs::exists(exe, ec)) return say("sa2b.exe isn't next to the launcher.");
+        needBuild = Setup::needed(exeDir, pathU8(cfg.disc));
+        if (needBuild) return startBuild();
         std::vector<std::string> a = {"--iso", cfg.disc, "--volume", std::to_string(cfg.volume)};
         if (cfg.fullscreen) a.push_back("--fullscreen");
         else a.push_back("--window"), a.push_back(std::to_string(cfg.winW) + "x" + std::to_string(cfg.winH));
@@ -734,6 +772,7 @@ struct App {
         if (n) sel = (sel + d + n) % n;
     }
     void left_right(int d) {
+        if (screen == Screen::Setup) return move(d);  // (its buttons are side by side)
         auto v = items();
         if (sel < int(v.size()) && v[size_t(sel)].change) v[size_t(sel)].change(d);
     }
@@ -745,6 +784,10 @@ struct App {
         if (screen == Screen::Settings) cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 1);
         else if (screen == Screen::Hd) go(Screen::Main, 2);
         else if (screen == Screen::Mods) go(Screen::Main, 3);
+        else if (screen == Screen::Setup) {
+            if (build.running()) build.cancel();
+            else go(Screen::Main, 0);
+        }
     }
 
     // Where each item is drawn (layout space), for drawing and the mouse.
@@ -755,6 +798,9 @@ struct App {
             const float x = discOk() ? 700 : 400, w = 480, h = 66, step = 84;
             const float y0 = (discOk() ? 380 : 330) - float(v.size()) * step / 2;
             for (size_t i = 0; i < v.size(); i++) r.push_back({x, y0 + float(i) * step, w, h});
+        } else if (screen == Screen::Setup) {  // buttons side by side under the progress
+            const float w = 340, h = 56, gap = 30, total = float(v.size()) * w + float(v.size() > 0 ? v.size() - 1 : 0) * gap;
+            for (size_t i = 0; i < v.size(); i++) r.push_back({(kW - total) / 2 + float(i) * (w + gap), 536, w, h});
         } else {
             const float x = 240, w = 800, step = 49, y0 = screen == Screen::Hd ? 330.f : 130.f;
             for (size_t i = 0; i < v.size(); i++) {
@@ -841,7 +887,11 @@ struct App {
             draw(logo, {x, y, size, size});
         }
         // page titles
-        const char* title = screen == Screen::Settings ? "settings" : screen == Screen::Hd ? "hdtex" : screen == Screen::Mods ? "mods" : nullptr;
+        const char* title = screen == Screen::Settings ? "settings"
+                            : screen == Screen::Hd     ? "hdtex"
+                            : screen == Screen::Mods   ? "mods"
+                            : screen == Screen::Setup  ? "setup"
+                                                       : nullptr;
         if (title) {
             Tex& tx = label(title);
             const float s = 0.62f, a = std::min(1.f, screenT * 5);
@@ -883,6 +933,7 @@ struct App {
         }
 
         if (screen == Screen::Hd) drawHdInfo();
+        if (screen == Screen::Setup) drawSetupInfo();
         if (screen == Screen::Mods && mods.empty())
             text.drawWrapped("No mods installed. Mods are folders with a mod.ini, put in: " + strU8(dataDir / "mods"), 240, 300, 800, 1.0f, {1, 1, 1, 1}, 1);
 
@@ -899,6 +950,54 @@ struct App {
             text.drawWrapped(help, 60, kH - 96, kW - 120, 0.92f, recent ? SDL_FColor{1, 0.85f, 0.4f, 1} : SDL_FColor{1, 1, 1, 1}, 1, 29, 2);
             text.draw("Disc: " + strU8(pathU8(cfg.disc).filename()), kW / 2, kH - 30, 0.7f, {0.6f, 0.68f, 0.85f, 1}, 1);
         }
+    }
+
+    // A bar in the menus' style: the inset bar as the track, the lit one filled to k.
+    void progressBar(SDL_FRect track, float k, float glow = 0) {
+        k = std::clamp(k, 0.f, 1.f);
+        if (!bars) return;
+        draw(bars, {0, 43, 256, 41}, track, 0.6f, 0.6f, 0.7f, 1);
+        draw(bars, {0, 0, 256.f * k, 41}, {track.x, track.y, track.w * k, track.h});
+        if (glow > 0) draw(bars, {0, 0, 256.f * k, 41}, {track.x, track.y, track.w * k, track.h}, 0.5f, 0.8f, 1, glow, SDL_BLENDMODE_ADD);
+    }
+
+    // The SETUP page: the five steps, the current one's bar and the whole build's.
+    void drawSetupInfo() {
+        const Setup::Status s = build.status();
+        const SDL_FColor white{1, 1, 1, 1}, dim{0.62f, 0.70f, 0.90f, 1}, gold{1, 0.85f, 0.4f, 1}, green{0.55f, 1, 0.6f, 1}, red{1, 0.5f, 0.45f, 1};
+        const char* head = s.running ? "Building the game from your disc" : s.done ? "The game is ready" : s.cancelled ? "Cancelled" : "The setup stopped";
+        text.draw(head, kW / 2, 112, 1.1f, white, 1);
+        text.drawWrapped("No game code comes with this program: the recompiler translates the program on your own disc into native code, "
+                         "here on your computer. It is done once.",
+                         240, 150, 800, 0.8f, dim, 1, 28, 2);
+        // the steps: done, under way (its percentage) or still to come
+        for (int i = 0; i < Setup::kSteps; i++) {
+            const float y = 222 + float(i) * 32;
+            const bool past = s.done || i < s.step, now = i == s.step && !s.done;
+            const SDL_FColor c = past ? green : now ? (s.running ? gold : s.cancelled ? dim : red) : dim;
+            text.draw(std::to_string(i + 1) + ".  " + Setup::stepName(i), 330, y, 0.9f, c);
+            std::string state;
+            if (past) state = "Done";
+            else if (now && s.running) state = std::to_string(int(s.stepFrac * 100)) + "%";
+            else if (now) state = s.cancelled ? "Cancelled" : "Stopped";
+            text.draw(state, 950, y, 0.9f, c, 2);
+        }
+        if (s.failed) {
+            text.drawWrapped(s.error, 240, 392, 800, 0.85f, red, 1, 28, 4);
+            text.draw("setup.log has the details.", kW / 2, 496, 0.75f, dim, 1);
+            return;
+        }
+        if (!s.running && !s.done) return;
+        // this step's bar, with what it is on
+        const std::string detail = std::string(Setup::stepName(s.step)) + (s.detail.empty() ? "" : ": " + s.detail);
+        text.draw(detail, 290, 388, 0.75f, dim);
+        progressBar({290, 414, 700, 16}, s.stepFrac);
+        // and the whole build's
+        progressBar({290, 442, 700, 30}, s.overall, 0.12f + 0.08f * std::sin(t * 4));
+        std::string line = std::to_string(int(s.overall * 100)) + "%   " + fmtClock(s.elapsed);
+        if (s.eta >= 0) line += "   about " + fmtTime(long(s.eta)) + " left";
+        text.draw(line, kW / 2, 480, 0.8f, white, 1);
+        if (!s.note.empty()) text.drawWrapped(s.note, 240, 506, 800, 0.7f, dim, 1, 24, 1);
     }
 
     void drawHdInfo() {
@@ -988,12 +1087,17 @@ int main(int argc, char** argv) {
     using namespace launcher;
     // --shot <file.bmp> [<page: main|settings|hd|mods>] (checking the look): draws that page in a
     // hidden window for two seconds, saves it and exits.
+    // --build-only: runs the setup (building sa2b_game.dll from the chosen disc) in a hidden window and
+    // exits, 0 when the module was built.
     const char* shot = nullptr;
     std::string shotPage = "main";
+    bool buildOnly = false;
     for (int i = 1; i < argc; i++)
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
             shot = argv[++i];
             if (i + 1 < argc && argv[i + 1][0] != '-') shotPage = argv[++i];
+        } else if (!std::strcmp(argv[i], "--build-only")) {
+            buildOnly = true;
         }
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");  // the icon in the program (res/sa2b.rc)
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
@@ -1005,13 +1109,33 @@ int main(int argc, char** argv) {
     if (const SDL_DisplayMode* dm = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay()); dm && dm->h >= 1080) w = 1600, h = 900;
     if (shot) w = 1280, h = 720;
     if (!SDL_CreateWindowAndRenderer("Sonic Adventure 2: Battle", w, h,
-                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot ? SDL_WINDOW_HIDDEN : 0), &app.win, &g_ren))
+                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot || buildOnly ? SDL_WINDOW_HIDDEN : 0), &app.win, &g_ren))
         return 1;
     SDL_SetRenderVSync(g_ren, 1);
     SDL_SetRenderLogicalPresentation(g_ren, int(kW), int(kH), SDL_LOGICAL_PRESENTATION_LETTERBOX);
     app.init();
+    if (buildOnly) {
+        if (!app.discOk()) return 2;
+        app.startBuild();
+        while (app.build.running()) {
+            app.frame(1 / 60.f);
+            SDL_Delay(16);
+        }
+        const bool built = app.build.status().done;
+        SDL_Quit();
+        return built ? 0 : 1;
+    }
     if (shot) {
         app.go(shotPage == "settings" ? Screen::Settings : shotPage == "hd" ? Screen::Hd : shotPage == "mods" ? Screen::Mods : Screen::Main);
+        if (shotPage == "setup") {  // a real build, taken a third of the way into compiling (then stopped)
+            app.startBuild();
+            for (;;) {
+                const Setup::Status s = app.build.status();
+                if (!s.running || (s.step == Setup::Compile && s.stepFrac > 0.33f)) break;
+                app.frame(1 / 60.f);
+                SDL_Delay(16);
+            }
+        }
         for (int i = 0; i < 120; i++) {
             app.frame(1 / 60.f);
         }
@@ -1092,6 +1216,7 @@ int main(int argc, char** argv) {
         const float dt = std::min(0.1f, float(now - last) / 1e9f);
         last = now;
         app.pollDialog();
+        app.pollBuild();
         if (app.gameRunning) {
             if (app.game.running()) {
                 SDL_Delay(100);
@@ -1131,6 +1256,7 @@ int main(int argc, char** argv) {
         app.frame(dt);
     }
     app.cfg.save(app.dataDir / "launcher.ini");
+    app.build.cancel();  // (a build under way stops; nothing of it is kept)
     SDL_Quit();
     return 0;
 }

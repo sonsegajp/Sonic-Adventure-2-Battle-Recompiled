@@ -86,8 +86,41 @@ bool Disc::read(const std::string& name, Bytes& out) {
     return false;
 }
 
+std::vector<Disc::File> Disc::files() const {
+    std::vector<File> out;
+    if (!m_open) return out;
+    const uint32_t count = be32(&m_fst[8]);
+    if (count == 0 || size_t(count) * 12 > m_fst.size()) return out;
+    const char* strings = reinterpret_cast<const char*>(&m_fst[size_t(count) * 12]);
+    const size_t stringsSize = m_fst.size() - size_t(count) * 12;
+    // a directory's entries run from it to its "next"; the open ones, innermost last
+    std::vector<std::pair<uint32_t, std::string>> dirs;
+    for (uint32_t i = 1; i < count; i++) {
+        while (!dirs.empty() && i >= dirs.back().first) dirs.pop_back();
+        const uint8_t* e = &m_fst[size_t(i) * 12];
+        const uint32_t nameOff = be32(e) & 0xFFFFFF;
+        const std::string name = nameOff < stringsSize ? std::string(strings + nameOff, strnlen(strings + nameOff, stringsSize - nameOff)) : "";
+        const std::string path = (dirs.empty() ? "" : dirs.back().second) + name;
+        if (e[0]) dirs.push_back({std::max(be32(e + 8), i + 1), path + "/"});
+        else out.push_back({path, be32(e + 4), be32(e + 8)});
+    }
+    return out;
+}
+
+bool Disc::readDol(Bytes& out) {
+    if (!m_open) return false;
+    const uint32_t at = be32(&m_header[0x420]);
+    uint8_t h[0x100];
+    if (!readAt(at, h, sizeof h)) return false;
+    uint32_t size = 0x100;
+    for (int i = 0; i < 18; i++) size = std::max(size, be32(h + i * 4) + be32(h + 0x90 + i * 4));
+    if (size > 0x1000000) return false;
+    out.assign(size, 0);
+    return readAt(at, out.data(), size);
+}
+
 // Sega PRS: LZ77 with a bit stream of control flags interleaved with the data.
-Bytes prsDecompress(const Bytes& src) {
+Bytes prsDecompress(const Bytes& src, size_t limit) {
     Bytes out;
     size_t i = 0;
     int bits = 0;
@@ -101,7 +134,7 @@ Bytes prsDecompress(const Bytes& src) {
         ctrl >>= 1, bits--;
         return b;
     };
-    while (i < src.size()) {
+    while (i < src.size() && out.size() < limit) {
         if (bit()) {  // literal
             out.push_back(src[i++]);
             continue;
