@@ -25,16 +25,27 @@ LONG WINAPI onCrash(EXCEPTION_POINTERS* ep) {
                        reinterpret_cast<LPCSTR>(pc), &mod);
     char name[MAX_PATH] = "?";
     if (mod) GetModuleFileNameA(mod, name, MAX_PATH);
-    std::fprintf(stdout, "\nCRASH: exception %08lX at %p (%s+%llX)", r->ExceptionCode, r->ExceptionAddress, name,
-                 (unsigned long long)(pc - reinterpret_cast<uintptr_t>(mod)));
+    // (through log(): into sa2b.log too - a game started by the launcher has no console)
+    char what[160] = "";
     if (r->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && r->NumberParameters >= 2) {
         const auto addr = r->ExceptionInformation[1];
         const auto mem = reinterpret_cast<uintptr_t>(g_mem);
-        std::fprintf(stdout, ", %s %llX", r->ExceptionInformation[0] ? "writing" : "reading", (unsigned long long)addr);
-        if (addr >= mem && addr < mem + kHostMemSize) std::fprintf(stdout, " (guest memory +%llX)", (unsigned long long)(addr - mem));
+        std::snprintf(what, sizeof what, ", %s %llX%s", r->ExceptionInformation[0] ? "writing" : "reading", (unsigned long long)addr,
+                      addr >= mem && addr < mem + kHostMemSize ? " (guest memory)" : "");
     }
-    std::fprintf(stdout, "\n");
-    std::fflush(stdout);
+    log("\nCRASH: exception %08lX at %p (%s+%llX)%s\n", r->ExceptionCode, r->ExceptionAddress, name,
+        (unsigned long long)(pc - reinterpret_cast<uintptr_t>(mod)), what);
+    // the host call stack (through the exception dispatch into the faulting code), as module+offset
+    void* frames[48];
+    const USHORT n = CaptureStackBackTrace(0, 48, frames, nullptr);
+    for (USHORT i = 0; i < n; i++) {
+        HMODULE m = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(frames[i]), &m);
+        char mn[MAX_PATH] = "?";
+        if (m) GetModuleFileNameA(m, mn, MAX_PATH);
+        const char* base = std::strrchr(mn, '\\');
+        log("  %s+%llX\n", base ? base + 1 : mn, (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(m)));
+    }
     dumpAllThreads();
     sched::debugDump();
     std::fflush(stdout);
@@ -45,7 +56,7 @@ LONG WINAPI onCrash(EXCEPTION_POINTERS* ep) {
 // abort() (also reached from std::terminate, e.g. an uncaught C++ exception) fast-fails past the
 // exception filter; report it the same way, with the host call stack as module+offset.
 static void onAbort(int) {
-    std::fprintf(stdout, "\nABORT on host thread %lu; host stack:\n", GetCurrentThreadId());
+    log("\nABORT on host thread %lu; host stack:\n", GetCurrentThreadId());
     void* frames[48];
     const USHORT n = CaptureStackBackTrace(1, 48, frames, nullptr);
     for (USHORT i = 0; i < n; i++) {
@@ -55,8 +66,7 @@ static void onAbort(int) {
         char name[MAX_PATH] = "?";
         if (mod) GetModuleFileNameA(mod, name, MAX_PATH);
         const char* base = std::strrchr(name, '\\');
-        std::fprintf(stdout, "  %s+%llX\n", base ? base + 1 : name,
-                     (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(mod)));
+        log("  %s+%llX\n", base ? base + 1 : name, (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) - reinterpret_cast<uintptr_t>(mod)));
     }
     std::fflush(stdout);
     dumpAllThreads();

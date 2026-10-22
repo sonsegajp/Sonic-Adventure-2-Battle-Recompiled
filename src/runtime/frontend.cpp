@@ -17,6 +17,7 @@
 #include <dolphin/mtx.h>
 #include <dolphin/pad.h>
 #include <dolphin/vi.h>
+#include <SDL3/SDL_filesystem.h>
 #include <SDL3/SDL_hints.h>
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
@@ -377,8 +378,14 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
         else if (!std::strcmp(argv[i], "--window") && i + 1 < argc) std::sscanf(argv[++i], "%ux%u", &winW, &winH);
     }
     if (!winW || !winH) winW = 1280, winH = widescreen ? 720 : 960;
+    // The window's title is the project's name; Aurora's folders (shader cache, settings) get a name
+    // a path can hold - Aurora derives them from the title otherwise, and its colon made no path
+    // at all (a null cache path: a crash at start).
+    static char* const s_prefPath = SDL_GetPrefPath(nullptr, "SA2B Recompiled");
     const AuroraConfig cfg{
         .appName = "Sonic Adventure 2 Battle: Recompiled",
+        .userPath = s_prefPath,
+        .cachePath = s_prefPath,
         .vsync = vsync,
         .startFullscreen = fullscreen,
         .windowWidth = winW,
