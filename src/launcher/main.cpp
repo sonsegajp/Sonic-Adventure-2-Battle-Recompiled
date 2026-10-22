@@ -612,7 +612,7 @@ struct App {
             if (!upscalerReady()) {  // first: the upscaler itself (tools/hd/setup.ps1)
                 if (!setupJob.running())
                     v.push_back({"", [] { return std::string("Install the upscaler"); }, [] { return std::string(""); }, nullptr, [this] { startSetup(); },
-                                 [] { return std::string("Downloads Python, PyTorch and the HDcube model into the tools folder (about 3 GB with an NVIDIA card)."); }});
+                                 [] { return std::string("Downloads Python, PyTorch and the HDcube model into your AppData folder (about 3 GB with an NVIDIA card)."); }});
             } else if (!alive && s.state != "finished") {
                 v.push_back({"", [] { return std::string("Make HD textures"); }, [] { return std::string(""); }, nullptr, [this] { startHd(); },
                              [] { return std::string("Upscales every texture on your disc. It works in the background, even while you play; the game uses them once all are done."); }});
@@ -673,17 +673,28 @@ struct App {
         SDL_HideWindow(win);
     }
 
-    // The upscaler: tools/hd's own Python (setup.ps1 installs it; a developer's venv also does).
+    // The upscaler: Python with PyTorch and the HDcube model, which tools/hd/setup.ps1 installs in
+    // %LOCALAPPDATA%\SA2BRecompiled\upscaler (a short path: PyTorch's deep folders) - or, building
+    // from source, a venv and models in tools/hd.
     fs::path hdDir() const { return dataDir / "tools" / "hd"; }
+    static fs::path upscalerHome() {
+        const char* la = std::getenv("LOCALAPPDATA");
+        return la ? pathU8(la) / "SA2BRecompiled" / "upscaler" : fs::path();
+    }
     fs::path python() const {
         std::error_code ec;
-        const fs::path own = hdDir() / "python" / "python.exe";
-        return fs::exists(own, ec) ? own : hdDir() / "venv" / "Scripts" / "python.exe";
+        const fs::path own = upscalerHome() / "python" / "python.exe";
+        return !upscalerHome().empty() && fs::exists(own, ec) ? own : hdDir() / "venv" / "Scripts" / "python.exe";
+    }
+    fs::path models() const {
+        std::error_code ec;
+        const fs::path own = upscalerHome() / "models" / "Models" / "HDcube";
+        return !upscalerHome().empty() && fs::exists(own, ec) ? own : hdDir() / "models" / "Models" / "HDcube";
     }
     bool upscalerReady() const {
         std::error_code ec;
-        return fs::exists(python(), ec) && fs::exists(hdDir() / "build_pack.py", ec) &&
-               fs::exists(hdDir() / "models" / "Models" / "HDcube" / "4xHDCube4Compact.pth", ec);
+        return fs::exists(python(), ec) && fs::exists(hdDir() / "build_pack.py", ec) && fs::exists(models() / "4xHDCube4Compact.pth", ec) &&
+               fs::exists(models() / "4xHDcube-Alpha.pth", ec);
     }
     void startSetup() {
         std::error_code ec;
@@ -704,7 +715,11 @@ struct App {
         fs::create_directories(packDir(), ec);
         fs::remove(packDir() / "pause", ec);
         std::string err;
-        if (!hdJob.start(py, {strU8(script), "--iso", cfg.disc, "--out", strU8(packDir())}, dataDir, err)) say("The texture builder didn't start: " + err + ".");
+        if (!hdJob.start(py,
+                         {strU8(script), "--iso", cfg.disc, "--out", strU8(packDir()), "--model", strU8(models() / "4xHDCube4Compact.pth"),
+                          "--alpha-model", strU8(models() / "4xHDcube-Alpha.pth")},
+                         dataDir, err))
+            say("The texture builder didn't start: " + err + ".");
     }
     void setHdPause(bool pause) {
         std::error_code ec;

@@ -1,11 +1,12 @@
-# Installs what the HD texture builder (build_pack.py) needs, next to it in tools\hd - run by the
-# launcher's HD TEXTURES page, once:
+# Installs what the HD texture builder (build_pack.py) needs - run by the launcher's HD TEXTURES
+# page, once - in %LOCALAPPDATA%\SA2BRecompiled\upscaler (a short path: PyTorch's files nest so deep
+# that under a game folder in Downloads they pass Windows' 260-character limit and pip fails):
 #   python\   a private Python 3.11 (python.org's embeddable build) with PyTorch - the CUDA build when
 #             there is an NVIDIA graphics card, else the CPU one - and the other packages
 #   models\   HDcube 4 Compact and its alpha model, from their author's GitHub release (the model's
 #             licence does not allow passing it on, so it is fetched from there, not shipped)
-# Progress goes to setup_status.txt: "<running|finished|failed> <percent> <note>".
-param([string]$Dir = $PSScriptRoot)
+# Progress goes to setup_status.txt beside this script: "<running|finished|failed> <percent> <note>".
+param([string]$Dir = $PSScriptRoot, [string]$Target = (Join-Path $env:LOCALAPPDATA 'SA2BRecompiled\upscaler'))
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'  # (Invoke-WebRequest's progress bar slows downloads a lot)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -14,12 +15,12 @@ $status = Join-Path $Dir 'setup_status.txt'
 function Say([string]$state, [int]$pct, [string]$note) { Set-Content -Path $status -Value "$state $pct $note" -Encoding ascii }
 
 try {
-    $py = Join-Path $Dir 'python'
+    $py = Join-Path $Target 'python'
     $exe = Join-Path $py 'python.exe'
-    $tmp = Join-Path $Dir 'download'
+    $tmp = Join-Path $Target 'download'
     New-Item -ItemType Directory -Force $tmp | Out-Null
 
-    if (-not (Test-Path $exe)) {
+    if (-not (Test-Path (Join-Path $py 'Scripts\pip.exe'))) {
         Say running 2 'Downloading Python...'
         $zip = Join-Path $tmp 'python.zip'
         Invoke-WebRequest 'https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip' -OutFile $zip
@@ -48,7 +49,7 @@ try {
     Say running 90 'Downloading the HDcube model...'
     $mzip = Join-Path $tmp 'hdcube.zip'
     Invoke-WebRequest 'https://github.com/Venomalia/HDcube/releases/download/4.0/4xHDcube4Compact.zip' -OutFile $mzip
-    $models = Join-Path $Dir 'models'
+    $models = Join-Path $Target 'models'
     Expand-Archive $mzip -DestinationPath $models -Force
     if (-not (Test-Path (Join-Path $models 'Models\HDcube\4xHDCube4Compact.pth'))) { throw 'the model archive had no 4xHDCube4Compact.pth' }
 

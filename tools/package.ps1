@@ -21,5 +21,8 @@ Copy-Item (Join-Path $root 'res\README.txt') $out
 
 $zip = Join-Path $dist "SA2BRecompiled-$Version-windows-x64.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }
-Compress-Archive -Path $out -DestinationPath $zip -CompressionLevel Optimal
+# (Windows' tar writes a standard zip; PowerShell 5.1's Compress-Archive stores backslashes in
+# entry names, which other unzip tools turn into flat files named 'SA2BRecompiled\sa2b.exe')
+& (Join-Path $env:SystemRoot 'System32\tar.exe') -a -c -f $zip -C $dist SA2BRecompiled
+if ($LASTEXITCODE) { throw 'tar failed' }
 Get-Item $zip | ForEach-Object { "{0} ({1:N0} MB)" -f $_.FullName, ($_.Length / 1MB) }

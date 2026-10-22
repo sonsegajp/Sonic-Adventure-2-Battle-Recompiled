@@ -17,8 +17,8 @@ Playing
 
 HD textures (optional)
   On the launcher's HD TEXTURES page: Install the upscaler (Python, PyTorch and the HDcube model,
-  downloaded into tools\hd: about 3 GB with an NVIDIA card), then Make HD textures. About 10-20
-  minutes with a graphics card; it can run while you play.
+  downloaded into %LOCALAPPDATA%\SA2BRecompiled: about 3 GB with an NVIDIA card), then Make HD
+  textures. About 10-20 minutes with a graphics card; it can run while you play.
 
 Source code, issues: https://github.com/sonsegajp/SA2BRE
 
