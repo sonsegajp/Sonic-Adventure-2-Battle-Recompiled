@@ -36,6 +36,10 @@ Online co-op
   cutscenes; co-op has its own save (saves\coop). In the game: F1 for the co-op menu (colours,
   name, Discord), T to chat.
 
+Updates
+  When a newer release is out, UPDATE appears on the launcher's main menu: it downloads and installs
+  it (no account needed). Your saves and settings stay.
+
 What is in this folder
   SA2BLauncher.exe   the launcher, with the recompiler built in
   sa2b.exe, *.dll    the runtime: our own code standing in for the GameCube (graphics, sound, ...)

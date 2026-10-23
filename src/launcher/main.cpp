@@ -12,6 +12,7 @@
 // SETUP page builds it from the player's disc (setup.h, docs/SETUP.md).
 #include "launcher/disc.h"
 #include "launcher/setup.h"
+#include "launcher/update.h"
 #include "net/coopnet.h"
 
 #include <SDL3/SDL.h>
@@ -466,7 +467,7 @@ std::string fmtClock(float seconds) {  // time so far, m:ss
 }
 
 // ---- the app ----
-enum class Screen { Main, Settings, Mods, Setup, Coop };
+enum class Screen { Main, Settings, Mods, Setup, Coop, Update };
 
 // ---- co-op settings: coop.ini, shared with the game (src/runtime/coop.cpp); keys it does not use here are kept ----
 struct CoopIni {
@@ -533,6 +534,8 @@ struct App {
     bool gameRunning = false;
     std::vector<Mod> mods;
     Setup build;             // the game's code from the disc (SETUP page)
+    Updater updater;         // a newer release (UPDATE page)
+    bool restarting = false;
     bool needBuild = false;  // Setup::needed for the current disc
     std::vector<std::string> pendingArgs;  // options for the game once the setup is done (co-op)
     // CO-OP page: the link is made here first (both see each other before starting); the game makes
@@ -621,6 +624,9 @@ struct App {
             label("coop", [this] { openCoop(); }, "Play the story together online, each on your own screen. Co-op has its own save.");
             label("settings", [this] { go(Screen::Settings); }, "Display, frame rate, sound and disc options.");
             if (kMods) label("mods", [this] { mods = scanMods(dataDir / "mods"), go(Screen::Mods); }, "Turn installed mods on or off.");
+            if (const Updater::Status u = updater.status(); u.state == Updater::State::Available)
+                label("update", [this] { startUpdate(); },
+                      "Version " + u.latest + " is out: download and install it (about 75 MB). Your saves and settings stay.");
             label("quit", [this] { quit = true; }, "Close the launcher.");
         } else if (screen == Screen::Settings) {
             auto row = [&](std::string n, std::function<std::string()> val, std::function<void(int)> ch, std::string help, std::function<void()> act = nullptr) {
@@ -685,6 +691,11 @@ struct App {
             if (linked && st == coopnet::State::Connected)
                 label("play", [this] { launchCoop(); }, "Start the game together. Co-op plays on its own save, apart from your game.");
             label("back", [this] { endEdit(), go(Screen::Main, 1); }, "Back to the main menu.");
+        } else if (screen == Screen::Update) {
+            if (updater.status().state == Updater::State::Failed) {
+                label("tryagain", [this] { startUpdate(); }, "Try the update again.");
+                label("back", [this] { go(Screen::Main, 0); }, "Back to the main menu.");
+            }
         } else if (screen == Screen::Setup) {
             const Setup::Status s = build.status();
             if (s.running) {
@@ -841,6 +852,8 @@ struct App {
         } else if (screen == Screen::Setup) {
             if (build.running()) build.cancel();
             else go(Screen::Main, 0);
+        } else if (screen == Screen::Update) {
+            if (updater.status().state == Updater::State::Failed) go(Screen::Main, 0);
         }
     }
 
@@ -852,7 +865,7 @@ struct App {
             const float x = discOk() ? 700 : 400, w = 480, h = 66, step = 84;
             const float y0 = (discOk() ? 380 : 330) - float(v.size()) * step / 2;
             for (size_t i = 0; i < v.size(); i++) r.push_back({x, y0 + float(i) * step, w, h});
-        } else if (screen == Screen::Setup) {  // buttons side by side under the progress
+        } else if (screen == Screen::Setup || screen == Screen::Update) {  // buttons side by side under the progress
             const float w = 340, h = 56, gap = 30, total = float(v.size()) * w + float(v.size() > 0 ? v.size() - 1 : 0) * gap;
             for (size_t i = 0; i < v.size(); i++) r.push_back({(kW - total) / 2 + float(i) * (w + gap), 536, w, h});
         } else {
@@ -944,6 +957,7 @@ struct App {
         const char* title = screen == Screen::Settings ? "settings"
                             : screen == Screen::Mods   ? "mods"
                             : screen == Screen::Setup  ? "setup"
+                            : screen == Screen::Update ? "update"
                             : screen == Screen::Coop   ? "coop"
                                                        : nullptr;
         if (title) {
@@ -987,6 +1001,7 @@ struct App {
         }
 
         if (screen == Screen::Setup) drawSetupInfo();
+        if (screen == Screen::Update) drawUpdateInfo();
         if (screen == Screen::Mods && mods.empty())
             text.drawWrapped("No mods installed. Mods are folders with a mod.ini, put in: " + strU8(dataDir / "mods"), 240, 300, 800, 1.0f, {1, 1, 1, 1}, 1);
 
@@ -1012,6 +1027,46 @@ struct App {
         draw(bars, {0, 43, 256, 41}, track, 0.6f, 0.6f, 0.7f, 1);
         draw(bars, {0, 0, 256.f * k, 41}, {track.x, track.y, track.w * k, track.h});
         if (glow > 0) draw(bars, {0, 0, 256.f * k, 41}, {track.x, track.y, track.w * k, track.h}, 0.5f, 0.8f, 1, glow, SDL_BLENDMODE_ADD);
+    }
+
+    // The UPDATE page: the download's bar, then unpacking and installing; then the new launcher starts.
+    void startUpdate() {
+        go(Screen::Update);
+        updater.install(exeDir);
+    }
+    void drawUpdateInfo() {
+        const Updater::Status u = updater.status();
+        const SDL_FColor white{1, 1, 1, 1}, dim{0.62f, 0.70f, 0.90f, 1}, red{1, 0.5f, 0.45f, 1};
+        text.draw("Updating to version " + u.latest, kW / 2, 112, 1.1f, white, 1);
+        text.drawWrapped("Only this program's own files are replaced: your saves, settings and mods stay. The new version "
+                         "builds the game from your disc again, once, the next time you press PLAY.",
+                         240, 150, 800, 0.8f, dim, 1, 28, 2);
+        auto mb = [](uint64_t b) { return std::to_string((b + 524288) >> 20) + " MB"; };
+        std::string line;
+        float k = 0;
+        switch (u.state) {
+        case Updater::State::Downloading:
+            k = u.total ? float(double(u.bytes) / double(u.total)) : 0;
+            line = "Downloading: " + mb(u.bytes) + (u.total ? " of " + mb(u.total) : "");
+            break;
+        case Updater::State::Unpacking: k = 1, line = "Unpacking..."; break;
+        case Updater::State::Installing: k = 1, line = "Installing..."; break;
+        case Updater::State::Done: k = 1, line = "Done. Starting the new version..."; break;
+        case Updater::State::Failed:
+            text.drawWrapped("The update stopped: " + u.error + ". Nothing was changed.", 240, 300, 800, 0.9f, red, 1, 30, 3);
+            return;
+        default: line = "Starting..."; break;
+        }
+        progressBar({290, 300, 700, 30}, k, 0.12f + 0.08f * std::sin(t * 4));
+        text.draw(line, kW / 2, 346, 0.85f, white, 1);
+        if (u.state == Updater::State::Done && !restarting) {  // the new launcher, in our place
+            restarting = true;
+            GameProcess next;
+            std::string err;
+            std::error_code ec;
+            if (next.start(exeDir / "SA2BLauncher.exe", {}, fs::current_path(ec), err)) quit = true;
+            else say("Updated: start the launcher again (" + err + ").");
+        }
     }
 
     // The SETUP page: the five steps, the current one's bar and the whole build's.
@@ -1065,6 +1120,9 @@ struct App {
         cfg.load(dataDir / "launcher.ini");
         mods = scanMods(dataDir / "mods");
         loadDisc();
+        Updater::cleanup(exeDir);
+        const char* fake = std::getenv("SA2B_FAKE_VERSION");  // (tests: as if this were an older version)
+        updater.check(fake && *fake ? fake : SA2B_VERSION);
     }
 
     void pollDialog() {
@@ -1097,17 +1155,21 @@ int main(int argc, char** argv) {
     using namespace launcher;
     // --shot <file.bmp> [<page: main|settings|hd|mods>] (checking the look): draws that page in a
     // hidden window for two seconds, saves it and exits.
+    // --update-only: looks for a newer release and installs it, in a hidden window; 0 when installed
+    // or already the newest.
     // --build-only: runs the setup (building sa2b_game.dll from the chosen disc) in a hidden window and
     // exits, 0 when the module was built.
     const char* shot = nullptr;
     std::string shotPage = "main";
-    bool buildOnly = false;
+    bool buildOnly = false, updateOnly = false;
     for (int i = 1; i < argc; i++)
         if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
             shot = argv[++i];
             if (i + 1 < argc && argv[i + 1][0] != '-') shotPage = argv[++i];
         } else if (!std::strcmp(argv[i], "--build-only")) {
             buildOnly = true;
+        } else if (!std::strcmp(argv[i], "--update-only")) {
+            updateOnly = true;
         }
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1");  // the icon in the program (res/sa2b.rc)
     SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");
@@ -1119,11 +1181,28 @@ int main(int argc, char** argv) {
     if (const SDL_DisplayMode* dm = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay()); dm && dm->h >= 1080) w = 1600, h = 900;
     if (shot) w = 1280, h = 720;
     if (!SDL_CreateWindowAndRenderer("Sonic Adventure 2: Battle", w, h,
-                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot || buildOnly ? SDL_WINDOW_HIDDEN : 0), &app.win, &g_ren))
+                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (shot || buildOnly || updateOnly ? SDL_WINDOW_HIDDEN : 0), &app.win, &g_ren))
         return 1;
     SDL_SetRenderVSync(g_ren, 1);
     SDL_SetRenderLogicalPresentation(g_ren, int(kW), int(kH), SDL_LOGICAL_PRESENTATION_LETTERBOX);
     app.init();
+    if (updateOnly) {
+        auto wait = [&](auto busy) {
+            while (busy(app.updater.status().state)) SDL_Delay(50);
+        };
+        wait([](Updater::State s) { return s == Updater::State::Checking; });
+        Updater::Status u = app.updater.status();
+        std::printf("latest %s: %s\n", u.latest.c_str(), u.state == Updater::State::Available ? "newer, installing" : "nothing to do");
+        if (u.state == Updater::State::Available) {
+            app.updater.install(app.exeDir);
+            wait([](Updater::State s) { return s != Updater::State::Done && s != Updater::State::Failed; });
+            u = app.updater.status();
+            std::printf("%s %s\n", u.state == Updater::State::Done ? "installed" : "failed:", u.error.c_str());
+        }
+        std::fflush(stdout);
+        SDL_Quit();
+        return u.state == Updater::State::Failed ? 1 : 0;
+    }
     if (buildOnly) {
         if (!app.discOk()) return 2;
         app.startBuild();

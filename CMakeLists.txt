@@ -70,11 +70,14 @@ add_custom_command(OUTPUT ${_embed_out}
     DEPENDS tools/launcher/embed.cmake src/runtime/ctx.h src/runtime/modules.h src/runtime/abi.h src/game/glue.cpp
             config/GSNE8P/names.txt config/GSNE8P/patchpoints.txt
     COMMENT "Embedding the game module's sources in the launcher")
-add_executable(sa2b_launcher WIN32 src/launcher/main.cpp src/launcher/disc.cpp src/launcher/setup.cpp ${_embed_out} ${SA2_ICON_RC})
+add_executable(sa2b_launcher WIN32 src/launcher/main.cpp src/launcher/disc.cpp src/launcher/setup.cpp src/launcher/update.cpp ${_embed_out} ${SA2_ICON_RC})
 set_target_properties(sa2b_launcher PROPERTIES OUTPUT_NAME "SA2BLauncher")
 target_include_directories(sa2b_launcher PRIVATE src ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(sa2b_launcher PRIVATE SA2B_VERSION="${PROJECT_VERSION}")
 target_link_libraries(sa2b_launcher PRIVATE ${AURORA_SDL3_TARGET} sa2_recompiler sa2_coopnet)
+if (WIN32)
+    target_link_libraries(sa2b_launcher PRIVATE winhttp)  # (updates: src/launcher/update.cpp)
+endif ()
 if (WIN32)
     add_custom_command(TARGET sa2b_launcher POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_RUNTIME_DLLS:sa2b_launcher> $<TARGET_FILE_DIR:sa2b_launcher>

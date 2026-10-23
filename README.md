@@ -39,6 +39,9 @@ The launcher is drawn with the game's own menu art, lights and message font, rea
    starts.
 4. **SETTINGS** for display, frame rate, volume and loading.
 
+The launcher keeps itself up to date: when a newer release is out, **UPDATE** appears on its main
+menu and installs it (from this page's releases - no account needed). Saves and settings stay.
+
 Controls: a gamepad works directly. Keyboard: WASD stick, Space A, Shift B, F X, C Y, Enter START,
 Q/E L/R, IJKL C-stick, arrows D-pad. F11 toggles full screen.
 
