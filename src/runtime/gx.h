@@ -68,4 +68,12 @@ double gxInterpShowTime(double now);  // the time to show at `now` (that far beh
 std::shared_ptr<GxFrame> gxInterpBuild(double when, std::vector<u8>& out, std::vector<std::unique_ptr<u8[]>>& keep, float* shownT);
 double gxNow();  // GxFrame::time's clock
 
+// While set (co-op, around one object's drawing: src/runtime/coopcolour.cpp), each texture loaded for
+// drawing (guest address, GX format, width, height) is offered here first: a result is drawn in the
+// game's data's place (host memory, kept until the frame is drawn); nullptr leaves it as it is.
+extern const u8* (*g_texSubstitute)(u32 addr, u32 format, u32 width, u32 height);
+// An eye-space point (the game thread, during the 3D drawing) on the game's 640x480 screen, through
+// the projection and viewport the game has set; false behind the eye.
+bool gxProject(const float eye[3], float& x, float& y);
+
 }  // namespace rt

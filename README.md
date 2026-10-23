@@ -13,7 +13,7 @@ the game's code from your disc, on your computer, with the recompiler and a bund
 
 <p>
   <img src="docs/launcher_settings.png" width="49%" alt="Launcher settings">
-  <img src="docs/launcher_hd.png" width="49%" alt="Launcher HD textures">
+  <img src="docs/launcher_coop.png" width="49%" alt="Launcher co-op">
 </p>
 
 The launcher is drawn with the game's own menu art, lights and message font, read from your disc.
@@ -23,8 +23,9 @@ The launcher is drawn with the game's own menu art, lights and message font, rea
 - Story, stage select, Chao World, kart races, bosses, 2P battle and memory card saves
 - Widescreen at any aspect ratio (16:9, 16:10, ultrawide, resizable windows), HUD kept at the edges
 - Smooth motion on 120/144 Hz displays (in-between frames), the game itself at its 60 Hz
-- Optional **HD textures**: every texture on your disc upscaled 4x with the HDcube model, made on
-  your own computer from the launcher
+- **Online co-op**: play the story together, each on your own screen - your partner in your stage
+  as the other side's character, shared rings and enemies, one treasure hunt and one boss for both,
+  character colours, chat and name tags ([docs/COOP.md](docs/COOP.md))
 - Original disc loading times by default (cutscenes are timed for them), or instant loading
 - A launcher in the game's own style: drawn with the menu art, lights and font from your disc
 
@@ -78,12 +79,13 @@ To check yours: `Get-FileHash -Algorithm SHA1 "<disc image>"` in PowerShell. An 
 (SHA-1 of the extracted program: `e23d2e3b41d2b051b3360fb1b55f9af6a96d6c37`); another version of the
 game (Europe, Japan) is not.
 
-### HD textures
+### Online co-op
 
-On the launcher's **HD TEXTURES** page: **Install the upscaler** (a private copy of Python and
-PyTorch, and the HDcube model from its author's release page, about 3 GB with an NVIDIA card), then
-**Make HD textures**. It takes about 10-20 minutes with a graphics card, longer on the processor
-alone, and can run while you play; the game uses the textures once all are done.
+**CO-OP** on the launcher (or **F1** in the game): host and send your partner the code, or join with
+theirs. The host plays the story's character and the joiner the other side's (Sonic/Shadow,
+Tails/Eggman, Knuckles/Rouge); the host drives the menus and cutscenes. Co-op has its own save
+(`saves/coop`). In the game, **F1** opens the co-op menu (colours, name, Discord) and **T** the chat.
+All of it: [docs/COOP.md](docs/COOP.md).
 
 ## Building from source
 
@@ -117,8 +119,6 @@ interrupts, threads, DVD, audio DSP, memory card, video) and hands the game's GX
 - SDL3, Dawn, libpng, zlib, xxHash: see `THIRD_PARTY_NOTICES.txt` in a release.
 - [LLVM](https://llvm.org) 19.1.5's clang and lld (Apache 2.0 with LLVM Exceptions), bundled
   unchanged for the setup.
-- [HDcube](https://github.com/Venomalia/HDcube) by Venomalia: downloaded from its author by the
-  upscaler setup, never redistributed here.
 - The launcher's button lettering is rendered from Vipnagorgialla by Typodermic Fonts (words as
   images; the font itself is not included).
 

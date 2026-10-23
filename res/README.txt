@@ -29,17 +29,18 @@ Your disc image
   A trimmed or otherwise different image of the same disc is accepted too when the game's program
   on it is identical. Keep the program in a folder you can write to (not Program Files).
 
-HD textures (optional)
-  On the launcher's HD TEXTURES page: Install the upscaler (Python, PyTorch and the HDcube model,
-  downloaded into %LOCALAPPDATA%\SA2BRecompiled: about 3 GB with an NVIDIA card), then Make HD
-  textures. About 10-20 minutes with a graphics card; it can run while you play.
+Online co-op
+  CO-OP on the launcher (or F1 in the game): host and send your partner the code, or join with
+  theirs. Each of you plays on your own screen: the host the story's character, the joiner the
+  other side's (Sonic/Shadow, Tails/Eggman, Knuckles/Rouge). The host drives the menus and
+  cutscenes; co-op has its own save (saves\coop). In the game: F1 for the co-op menu (colours,
+  name, Discord), T to chat.
 
 What is in this folder
   SA2BLauncher.exe   the launcher, with the recompiler built in
   sa2b.exe, *.dll    the runtime: our own code standing in for the GameCube (graphics, sound, ...)
   sa2b.lib           the runtime's interface, for linking the game's code
   tools\llvm         the compiler and linker the setup uses (LLVM 19.1.5, unchanged)
-  tools\hd           the HD texture builder's scripts
 
 Source code, issues, how the setup works: https://github.com/sonsegajp/Sonic-Adventure-2-Battle-Recompiled
   (docs/SETUP.md)

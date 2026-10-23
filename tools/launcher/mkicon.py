@@ -4,7 +4,7 @@
 #   --disc <iso>: build/icon/sa2b.ico from the game's own art on the user's disc - Sonic's lives icon
 #     (zanki_sonic.GVR, 32x32) as it is, its pixels enlarged whole for the large sizes. Never
 #     committed: the build uses it when present.
-#   tools/hd/venv/Scripts/python tools/launcher/mkicon.py [--disc <iso>]
+#   python tools/launcher/mkicon.py [--disc <iso>]  (with Pillow and NumPy)
 import math
 import os
 
@@ -55,7 +55,7 @@ def icon():
 
 def disc_icon(iso):
     import sys
-    sys.path.insert(0, os.path.join(ROOT, 'tools', 'hd'))
+    sys.path.insert(0, os.path.join(ROOT, 'tools', 'launcher'))  # (gvr.py)
     sys.path.insert(0, os.path.join(ROOT, 'tools'))
     import build_pack
     import gvr

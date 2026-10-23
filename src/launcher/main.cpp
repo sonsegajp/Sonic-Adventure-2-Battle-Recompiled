@@ -1,12 +1,12 @@
-// SA2B launcher: picks the disc, sets the game's options, builds HD textures, turns mods on and
-// off, and starts sa2b. It looks like the game's own menus because it is drawn with them - the
+// SA2B launcher: picks the disc, sets the game's options, turns mods on and off, connects co-op,
+// and starts sa2b. It looks like the game's own menus because it is drawn with them - the
 // title art, the bokeh lights, the menu bars and the message font are read from the user's disc
 // when it starts (nothing of the game ships with it). Its own button words are prerendered images
 // (labels.inc, tools/launcher/mklabels.py).
 //
 // Files, in the data folder (the first of the working folder, the launcher's folder and the one two
 // above it that has saves/ or launcher.ini; else the launcher's): launcher.ini (settings),
-// mods/enabled.txt (mods turned on), textures/GSNE8P (the HD texture pack), setup.log.
+// mods/enabled.txt (mods turned on), setup.log.
 //
 // The game's code is not shipped: on the first PLAY (and after an update or a change of disc) the
 // SETUP page builds it from the player's disc (setup.h, docs/SETUP.md).
@@ -72,7 +72,6 @@ struct Config {
     bool fixed60 = false;  // false: in-between frames on high-refresh displays
     int volume = 100;
     bool fastDisc = false;
-    bool hdTextures = true;
 
     void load(const fs::path& p) {
         std::ifstream f(p);
@@ -88,14 +87,12 @@ struct Config {
             else if (k == "framerate") fixed60 = v == "60";
             else if (k == "volume") volume = std::clamp(std::atoi(v.c_str()), 0, 100);
             else if (k == "discloading") fastDisc = v == "instant";
-            else if (k == "hdtextures") hdTextures = v == "1";
         }
     }
     void save(const fs::path& p) const {
         std::ofstream f(p);
         f << "disc=" << disc << "\nfullscreen=" << fullscreen << "\nwindow=" << winW << "x" << winH << "\nwidescreen=" << widescreen
-          << "\nframerate=" << (fixed60 ? "60" : "auto") << "\nvolume=" << volume << "\ndiscloading=" << (fastDisc ? "instant" : "console")
-          << "\nhdtextures=" << hdTextures << "\n";
+          << "\nframerate=" << (fixed60 ? "60" : "auto") << "\nvolume=" << volume << "\ndiscloading=" << (fastDisc ? "instant" : "console") << "\n";
     }
 };
 
@@ -455,26 +452,6 @@ void saveMods(const fs::path& dir, const std::vector<Mod>& mods) {
         if (m.on) f << m.folder << "\n";
 }
 
-// ---- HD texture builder status (tools/hd/build_pack.py writes <pack>/status.txt) ----
-struct HdStatus {
-    std::string state;  // "", running, paused, finished, failed
-    long done = 0, total = 0, eta = 0;
-    std::string note;
-    bool fresh = false;  // written in the last 15 s (a builder is alive)
-};
-HdStatus readHd(const fs::path& pack) {
-    HdStatus s;
-    std::error_code ec;
-    std::ifstream f(pack / "status.txt");
-    if (!f) return s;
-    f >> s.state >> s.done >> s.total >> s.eta;
-    std::getline(f, s.note);
-    if (!s.note.empty() && s.note[0] == ' ') s.note.erase(0, 1);
-    const auto t = fs::last_write_time(pack / "status.txt", ec);
-    s.fresh = !ec && fs::file_time_type::clock::now() - t < std::chrono::seconds(15);
-    return s;
-}
-
 std::string fmtTime(long s) {
     char b[32];
     if (s >= 3600) std::snprintf(b, sizeof b, "%ld h %02ld min", s / 3600, s / 60 % 60);
@@ -489,7 +466,7 @@ std::string fmtClock(float seconds) {  // time so far, m:ss
 }
 
 // ---- the app ----
-enum class Screen { Main, Settings, Hd, Mods, Setup, Coop };
+enum class Screen { Main, Settings, Mods, Setup, Coop };
 
 // ---- co-op settings: coop.ini, shared with the game (src/runtime/coop.cpp); keys it does not use here are kept ----
 struct CoopIni {
@@ -555,7 +532,6 @@ struct App {
     GameProcess game;
     bool gameRunning = false;
     std::vector<Mod> mods;
-    GameProcess hdJob, setupJob;
     Setup build;             // the game's code from the disc (SETUP page)
     bool needBuild = false;  // Setup::needed for the current disc
     std::vector<std::string> pendingArgs;  // options for the game once the setup is done (co-op)
@@ -572,8 +548,6 @@ struct App {
     bool dialogDone = false;
     float mouseX = -1, mouseY = -1;
     bool quit = false;
-
-    fs::path packDir() const { return dataDir / "textures" / "GSNE8P"; }
 
     void say(const std::string& s) { status = s, statusT = t; }
 
@@ -646,7 +620,6 @@ struct App {
                   needBuild ? "Start the game. First the game is built from your disc, once: about 10 to 20 minutes." : "Start the game.");
             label("coop", [this] { openCoop(); }, "Play the story together online, each on your own screen. Co-op has its own save.");
             label("settings", [this] { go(Screen::Settings); }, "Display, frame rate, sound and disc options.");
-            label("hdtex", [this] { go(Screen::Hd); }, "Make high-resolution textures from your disc with an upscaling model.");
             if (kMods) label("mods", [this] { mods = scanMods(dataDir / "mods"), go(Screen::Mods); }, "Turn installed mods on or off.");
             label("quit", [this] { quit = true; }, "Close the launcher.");
         } else if (screen == Screen::Settings) {
@@ -672,11 +645,6 @@ struct App {
                 "How loud the game plays.");
             row("Disc loading", [this] { return cfg.fastDisc ? "Instant" : "Like the console"; }, [this](int) { cfg.fastDisc = !cfg.fastDisc; },
                 "Like the console keeps the original loading times. Instant loads at once.");
-            row("HD textures", [this] { return !packReady() ? "Not made yet" : cfg.hdTextures ? "On" : "Off"; },
-                [this](int) {
-                    if (packReady()) cfg.hdTextures = !cfg.hdTextures;
-                },
-                "Use the high-resolution textures made on the HD TEXTURES page.");
             row("Disc", [this] { return strU8(pathU8(cfg.disc).filename()); }, [this](int) { chooseDisc(); },
                 "The disc image the game is played from. Press to choose another.", [this] { chooseDisc(); });
             label("back", [this] { cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 2); }, "Back to the main menu. Settings are saved.");
@@ -690,28 +658,6 @@ struct App {
                              }});
                 v.back().activate = [c = v.back().change] { c(1); };
             }
-            label("back", [this] { go(Screen::Main, 4); }, "Back to the main menu.");
-        } else if (screen == Screen::Hd) {
-            const HdStatus s = readHd(packDir());
-            const bool alive = hdJob.running() || (s.fresh && (s.state == "running" || s.state == "paused"));
-            if (!upscalerReady()) {  // first: the upscaler itself (tools/hd/setup.ps1)
-                if (!setupJob.running())
-                    v.push_back({"", [] { return std::string("Install the upscaler"); }, [] { return std::string(""); }, nullptr, [this] { startSetup(); },
-                                 [] { return std::string("Downloads Python, PyTorch and the HDcube model into your AppData folder (about 3 GB with an NVIDIA card)."); }});
-            } else if (!alive && s.state != "finished") {
-                v.push_back({"", [] { return std::string("Make HD textures"); }, [] { return std::string(""); }, nullptr, [this] { startHd(); },
-                             [] { return std::string("Upscales every texture on your disc. It works in the background, even while you play; the game uses them once all are done."); }});
-            } else if (alive) {
-                const bool paused = s.state == "paused";
-                v.push_back({"", [paused] { return std::string(paused ? "Resume" : "Pause"); }, [] { return std::string(""); }, nullptr,
-                             [this, paused] { setHdPause(!paused); },
-                             [] { return std::string("Pausing frees your computer; the work done so far is kept."); }});
-            }
-            if (packReady())
-                v.push_back({"", [] { return std::string("Use them"); }, [this] { return std::string(cfg.hdTextures ? "On" : "Off"); },
-                             [this](int) { cfg.hdTextures = !cfg.hdTextures, cfg.save(dataDir / "launcher.ini"); },
-                             [this] { cfg.hdTextures = !cfg.hdTextures, cfg.save(dataDir / "launcher.ini"); },
-                             [] { return std::string("Play with the HD textures or the originals."); }});
             label("back", [this] { go(Screen::Main, 3); }, "Back to the main menu.");
         } else if (screen == Screen::Coop) {
             auto row = [&](std::string n, std::function<std::string()> val, std::string help, std::function<void()> act) {
@@ -749,11 +695,6 @@ struct App {
             }
         }
         return v;
-    }
-
-    bool packReady() const {
-        std::error_code ec;
-        return fs::exists(packDir() / "pack.txt", ec);
     }
 
     void go(Screen s, int select = 0) {
@@ -867,7 +808,6 @@ struct App {
         if (!cfg.widescreen) a.push_back("--no-widescreen");
         if (cfg.fixed60) a.push_back("--no-interp");
         if (cfg.fastDisc) a.push_back("--fast-disc");
-        if (cfg.hdTextures && packReady()) a.push_back("--hd-textures"), a.push_back(strU8(packDir()));
         if (kMods && std::any_of(mods.begin(), mods.end(), [](const Mod& m) { return m.on; })) a.push_back("--mods");
         a.insert(a.end(), extra.begin(), extra.end());
         pendingArgs.clear();
@@ -876,60 +816,6 @@ struct App {
         if (!game.start(exe, a, dataDir, err)) return say("The game didn't start: " + err + ".");
         gameRunning = true;
         SDL_HideWindow(win);
-    }
-
-    // The upscaler: Python with PyTorch and the HDcube model, which tools/hd/setup.ps1 installs in
-    // %LOCALAPPDATA%\SA2BRecompiled\upscaler (a short path: PyTorch's deep folders) - or, building
-    // from source, a venv and models in tools/hd.
-    fs::path hdDir() const { return dataDir / "tools" / "hd"; }
-    static fs::path upscalerHome() {
-        const char* la = std::getenv("LOCALAPPDATA");
-        return la ? pathU8(la) / "SA2BRecompiled" / "upscaler" : fs::path();
-    }
-    fs::path python() const {
-        std::error_code ec;
-        const fs::path own = upscalerHome() / "python" / "python.exe";
-        return !upscalerHome().empty() && fs::exists(own, ec) ? own : hdDir() / "venv" / "Scripts" / "python.exe";
-    }
-    fs::path models() const {
-        std::error_code ec;
-        const fs::path own = upscalerHome() / "models" / "Models" / "HDcube";
-        return !upscalerHome().empty() && fs::exists(own, ec) ? own : hdDir() / "models" / "Models" / "HDcube";
-    }
-    bool upscalerReady() const {
-        std::error_code ec;
-        return fs::exists(python(), ec) && fs::exists(hdDir() / "build_pack.py", ec) && fs::exists(models() / "4xHDCube4Compact.pth", ec) &&
-               fs::exists(models() / "4xHDcube-Alpha.pth", ec);
-    }
-    void startSetup() {
-        std::error_code ec;
-        const fs::path script = hdDir() / "setup.ps1";
-        if (!fs::exists(script, ec)) return say("tools/hd/setup.ps1 is missing.");
-        const char* root = std::getenv("SystemRoot");
-        const fs::path ps = fs::path(root ? root : "C:/Windows") / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe";
-        fs::remove(hdDir() / "setup_status.txt", ec);
-        std::string err;
-        if (!setupJob.start(ps, {"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", strU8(script)}, dataDir, err))
-            say("The upscaler's setup didn't start: " + err + ".");
-    }
-
-    void startHd() {
-        const fs::path py = python(), script = hdDir() / "build_pack.py";
-        std::error_code ec;
-        if (!upscalerReady()) return say("The upscaler isn't installed yet.");
-        fs::create_directories(packDir(), ec);
-        fs::remove(packDir() / "pause", ec);
-        std::string err;
-        if (!hdJob.start(py,
-                         {strU8(script), "--iso", cfg.disc, "--out", strU8(packDir()), "--model", strU8(models() / "4xHDCube4Compact.pth"),
-                          "--alpha-model", strU8(models() / "4xHDcube-Alpha.pth")},
-                         dataDir, err))
-            say("The texture builder didn't start: " + err + ".");
-    }
-    void setHdPause(bool pause) {
-        std::error_code ec;
-        if (pause) std::ofstream(packDir() / "pause") << "1";
-        else fs::remove(packDir() / "pause", ec);
     }
 
     // ---- input ----
@@ -948,8 +834,7 @@ struct App {
     }
     void cancel() {
         if (screen == Screen::Settings) cfg.save(dataDir / "launcher.ini"), go(Screen::Main, 2);
-        else if (screen == Screen::Hd) go(Screen::Main, 3);
-        else if (screen == Screen::Mods) go(Screen::Main, 4);
+        else if (screen == Screen::Mods) go(Screen::Main, 3);
         else if (screen == Screen::Coop) {
             if (editing) endEdit();
             else go(Screen::Main, 1);
@@ -971,7 +856,7 @@ struct App {
             const float w = 340, h = 56, gap = 30, total = float(v.size()) * w + float(v.size() > 0 ? v.size() - 1 : 0) * gap;
             for (size_t i = 0; i < v.size(); i++) r.push_back({(kW - total) / 2 + float(i) * (w + gap), 536, w, h});
         } else {
-            const float x = 240, w = 800, step = 49, y0 = screen == Screen::Hd ? 330.f : 130.f;
+            const float x = 240, w = 800, step = 49, y0 = 130.f;
             for (size_t i = 0; i < v.size(); i++) {
                 const bool lab = !v[i].label.empty();
                 r.push_back({lab ? x + w / 2 - 170 : x, y0 + float(i) * step + (lab ? 12 : 0), lab ? 340 : w, lab ? 56.f : 44.f});
@@ -1057,7 +942,6 @@ struct App {
         }
         // page titles
         const char* title = screen == Screen::Settings ? "settings"
-                            : screen == Screen::Hd     ? "hdtex"
                             : screen == Screen::Mods   ? "mods"
                             : screen == Screen::Setup  ? "setup"
                             : screen == Screen::Coop   ? "coop"
@@ -1102,7 +986,6 @@ struct App {
             }
         }
 
-        if (screen == Screen::Hd) drawHdInfo();
         if (screen == Screen::Setup) drawSetupInfo();
         if (screen == Screen::Mods && mods.empty())
             text.drawWrapped("No mods installed. Mods are folders with a mod.ini, put in: " + strU8(dataDir / "mods"), 240, 300, 800, 1.0f, {1, 1, 1, 1}, 1);
@@ -1168,49 +1051,6 @@ struct App {
         if (s.eta >= 0) line += "   about " + fmtTime(long(s.eta)) + " left";
         text.draw(line, kW / 2, 480, 0.8f, white, 1);
         if (!s.note.empty()) text.drawWrapped(s.note, 240, 506, 800, 0.7f, dim, 1, 24, 1);
-    }
-
-    void drawHdInfo() {
-        if (!upscalerReady()) {  // the setup's progress (setup_status.txt: state, percent, note)
-            std::string state, note;
-            int pct = 0;
-            std::ifstream f(hdDir() / "setup_status.txt");
-            f >> state >> pct;
-            std::getline(f, note);
-            if (!note.empty() && note[0] == ' ') note.erase(0, 1);
-            const bool running = setupJob.running();
-            std::string line = running ? (note.empty() ? "Starting..." : note)
-                             : state == "failed" ? "The setup stopped: " + note + " Try again, or check your connection."
-                                                  : "To make HD textures, the upscaler is installed first: a private copy of Python and PyTorch, and the "
-                                                    "HDcube model by Venomalia, downloaded from its author.";
-            text.drawWrapped(line, 240, 150, 800, 1.0f, {1, 1, 1, 1}, 1, 30, 3);
-            if (running) {
-                const SDL_FRect track{290, 250, 700, 28};
-                if (bars) draw(bars, {0, 43, 256, 41}, track, 0.6f, 0.6f, 0.7f, 1);
-                const float k = std::clamp(pct / 100.f, 0.f, 1.f);
-                if (bars) draw(bars, {0, 0, 256.f * k, 41}, {track.x, track.y, track.w * k, track.h});
-            }
-            return;
-        }
-        const HdStatus s = readHd(packDir());
-        const bool alive = hdJob.running() || (s.fresh && (s.state == "running" || s.state == "paused"));
-        std::string line;
-        if (s.state == "finished" || (packReady() && !alive)) line = "Your HD textures are ready: " + std::to_string(s.total) + " textures, upscaled 4x.";
-        else if (alive && s.total) {
-            line = std::string(s.state == "paused" ? "Paused" : "Upscaling") + ": " + std::to_string(s.done) + " of " + std::to_string(s.total) + " textures";
-            if (s.state != "paused" && s.eta > 0) line += ", about " + fmtTime(s.eta) + " left";
-            line += ".";
-        } else if (alive) line = s.note.empty() ? "Starting..." : s.note;
-        else if (s.state == "failed") line = "The last build stopped: " + s.note;
-        else line = "Not made yet. Every texture is upscaled 4x with the HDCube model: about 10 to 20 minutes with a graphics card, a few hours on the processor alone. It takes about 3 GB.";
-        const float y = 150;
-        text.drawWrapped(line, 240, y, 800, 1.0f, {1, 1, 1, 1}, 1, 30, 3);
-        if (alive && s.total) {
-            const SDL_FRect track{290, y + 100, 700, 28};
-            if (bars) draw(bars, {0, 43, 256, 41}, track, 0.6f, 0.6f, 0.7f, 1);
-            const float k = float(s.done) / float(s.total);
-            if (bars) draw(bars, {0, 0, 256.f * k, 41}, {track.x, track.y, track.w * k, track.h});
-        }
     }
 
     void init() {
@@ -1296,7 +1136,7 @@ int main(int argc, char** argv) {
         return built ? 0 : 1;
     }
     if (shot) {
-        app.go(shotPage == "settings" ? Screen::Settings : shotPage == "hd" ? Screen::Hd : shotPage == "mods" ? Screen::Mods : Screen::Main);
+        app.go(shotPage == "settings" ? Screen::Settings : shotPage == "mods" ? Screen::Mods : Screen::Main);
         if (shotPage == "coop") app.openCoop();
         if (shotPage == "setup") {  // a real build, taken a third of the way into compiling (then stopped)
             app.startBuild();

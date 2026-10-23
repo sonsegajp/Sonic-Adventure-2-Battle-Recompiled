@@ -6,6 +6,8 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -14,7 +16,25 @@ namespace rt {
 
 namespace {
 SDL_AudioStream* s_stream = nullptr;
+std::atomic<int> s_beep{-1};  // the beep being mixed in: its next sample (-1: none)
+
+// A short two-note chime (co-op chat), over the game's own sound.
+void mixBeep(s16* buf, u32 frames) {
+    int at = s_beep.load();
+    if (at < 0) return;
+    constexpr int kNote = 32000 * 7 / 100;  // 70 ms a note
+    for (u32 i = 0; i < frames && at < 2 * kNote; i++, at++) {
+        const int inNote = at % kNote;
+        const float env = std::min(1.f, inNote / 160.f) * (1.f - float(inNote) / kNote);  // (no click in, fading out)
+        const float hz = at < kNote ? 1046.5f : 1568.f;  // C6, then G6
+        const int v = int(std::sin(6.2831853f * hz * float(at) / 32000.f) * 7000.f * env);
+        for (int ch = 0; ch < 2; ch++) buf[i * 2 + ch] = s16(std::clamp(int(buf[i * 2 + ch]) + v, -32768, 32767));
+    }
+    s_beep = at < 2 * kNote ? at : -1;
 }
+}  // namespace
+
+void audioBeep() { s_beep = 0; }
 
 void audioInit(bool enabled, float volume) {
     if (!enabled) {
@@ -47,6 +67,7 @@ void audioPushAi(u32 addr, u32 bytes) {
         buf[i * 2] = addr ? s16(rd16(addr + i * 4 + 2)) : 0;  // left
         buf[i * 2 + 1] = addr ? s16(rd16(addr + i * 4)) : 0;  // right
     }
+    mixBeep(buf.data(), frames);
     if (s_dump) std::fwrite(buf.data(), 4, frames, s_dump);
     if (!s_stream) return;
     // The AI is paced by the host clock and the device by its own, and the AI thread wakes a little

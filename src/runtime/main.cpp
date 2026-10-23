@@ -141,6 +141,7 @@ int main(int argc, char** argv) {
     interpInit();
     gameFixesInit();
     if (coop::active()) coop::gameInit();  // the partner as player 2 in the stages
+    else coop::soloInit();                 // (alone: your colours on your character)
     if (const char* w = std::getenv("SA2_WATCH")) {  // SA2_WATCH=<hex address>[:<length>]
         const char* colon = std::strchr(w, ':');
         installWatch(u32(std::strtoul(w, nullptr, 16)), colon ? u32(std::strtoul(colon + 1, nullptr, 0)) : 4);

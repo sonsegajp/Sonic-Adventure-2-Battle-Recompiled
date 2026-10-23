@@ -11,7 +11,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <atomic>
 #include <cstring>
+#include <deque>
+#include <iterator>
+#include <mutex>
 #include <string>
 
 namespace rt::coop {
@@ -22,8 +26,112 @@ struct Notice {
     double until = 0;
 };
 Notice s_notice;
+std::mutex s_noticeLock;  // (notices come from the game thread too)
 double nowS() { return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
-void notify(const std::string& t) { s_notice = {t, nowS() + 5}; }
+}  // namespace
+
+void notify(const std::string& t) {
+    std::lock_guard g(s_noticeLock);
+    s_notice = {t, nowS() + 5};
+}
+
+// ---- chat: T opens a line to type, Enter sends it, Esc closes; the last lines show bottom left ----
+namespace {
+struct ChatLine {
+    std::string name, text;
+    unsigned colour;
+    double at;
+};
+std::mutex s_chatLock;
+std::deque<ChatLine> s_chat;
+std::atomic<bool> s_typing{false};
+ImU32 imColour(unsigned rgb, float alpha) {
+    return IM_COL32(rgb >> 16 & 255, rgb >> 8 & 255, rgb & 255, int(alpha * 255));
+}
+}  // namespace
+
+void chatArrived(const std::string& name, unsigned colour, const std::string& text) {
+    log("[chat] %s (%06X): %s\n", name.c_str(), colour, text.c_str());
+    std::lock_guard g(s_chatLock);
+    s_chat.push_back({name, text, colour, nowS()});
+    while (s_chat.size() > 50) s_chat.pop_front();
+}
+bool typing() { return s_typing; }
+
+namespace {
+void chatOverlay(ImGuiIO& io, bool menuOpen) {
+    static bool s_t = false, s_opening = false;
+    static char s_line[150] = "";
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    const bool t = keys[SDL_SCANCODE_T];
+    // (opened the frame after T: so the T itself is not typed into the line)
+    if (s_opening) s_typing = true, s_opening = false, s_line[0] = 0;
+    if (t && !s_t && !s_typing && !menuOpen && !io.WantTextInput && link().state() == coopnet::State::Connected) s_opening = true;
+    s_t = t;
+    const double now = nowS();
+    std::deque<ChatLine> lines;
+    {
+        std::lock_guard g(s_chatLock);
+        for (size_t i = s_chat.size() > 8 ? s_chat.size() - 8 : 0; i < s_chat.size(); i++)
+            if (s_typing || now - s_chat[i].at < 12) lines.push_back(s_chat[i]);
+    }
+    if (lines.empty() && !s_typing) return;
+    const float width = std::min(io.DisplaySize.x * 0.45f, ImGui::GetFontSize() * 34);
+    ImGui::SetNextWindowPos(ImVec2(16, io.DisplaySize.y * 0.80f), ImGuiCond_Always, ImVec2(0, 1));
+    ImGui::SetNextWindowSize(ImVec2(width, 0));
+    ImGui::SetNextWindowBgAlpha(s_typing ? 0.6f : 0.25f);
+    ImGui::Begin("##chat", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                     ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | (s_typing ? 0 : ImGuiWindowFlags_NoInputs));
+    for (const ChatLine& l : lines) {
+        const float alpha = s_typing ? 1.f : std::clamp(float(12 - (now - l.at)) / 2.f, 0.f, 1.f);  // (fading the last 2 s)
+        ImGui::PushStyleColor(ImGuiCol_Text, imColour(l.colour, alpha));
+        ImGui::TextUnformatted((l.name + ":").c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_Text, imColour(0xFFFFFF, alpha));
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted(l.text.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    }
+    if (s_typing) {
+        ImGui::PushStyleColor(ImGuiCol_Text, imColour(myNameColour(), 1));
+        ImGui::TextUnformatted((settings().name + ":").c_str());
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::IsWindowAppearing() || !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
+        if (ImGui::InputText("##line", s_line, sizeof s_line, ImGuiInputTextFlags_EnterReturnsTrue)) {
+            if (s_line[0]) sendChat(s_line);
+            s_typing = false;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) s_typing = false;
+    }
+    ImGui::End();
+}
+
+// The partner's name above their head (coopgame.cpp: nameTag), from the game's 640x480 screen to
+// the window: the 4:3 picture at the window's height, centred (widescreen shows more at the sides).
+void nameTagOverlay(ImGuiIO& io) {
+    float x, y;
+    unsigned colour;
+    if (!nameTag(x, y, colour)) return;
+    const float scale = std::min(io.DisplaySize.x / 640.f, io.DisplaySize.y / 480.f);
+    const float wx = io.DisplaySize.x * 0.5f + (x - 320.f) * scale, wy = io.DisplaySize.y * 0.5f + (y - 240.f) * scale;
+    const std::string name = link().partnerName();
+    ImFont* font = ImGui::GetFont();
+    const float size = ImGui::GetFontSize() * 1.1f;
+    const ImVec2 ts = font->CalcTextSizeA(size, 1e9f, 0, name.c_str());
+    const ImVec2 at(wx - ts.x * 0.5f, wy - ts.y);
+    if (at.x < -ts.x || at.x > io.DisplaySize.x || at.y < -ts.y || at.y > io.DisplaySize.y) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    dl->AddText(font, size, ImVec2(at.x + 2, at.y + 2), IM_COL32(0, 0, 0, 170), name.c_str());  // (a shadow)
+    dl->AddText(font, size, at, imColour(colour, 1), name.c_str());
+}
+}  // namespace
+
+namespace {
 
 // Changes of the link worth telling, whether the menu is open or not.
 void watchLink() {
@@ -78,6 +186,64 @@ void coopMenu() {
     }
 }
 
+// Colours (coopcolour.cpp): each area as the game has it or a colour of your own - one of the
+// presets or any from the picker. Your partner sees them too.
+void colourMenu() {
+    struct Slot {
+        const char* group;  // (a heading when it changes)
+        const char* what;
+        int game;           // about the game's own (where a new own colour starts)
+    };
+    static const Slot kSlots[kColourSlots] = {
+        {"Sonic", "Blue", 0x1E3CE0},          {"Sonic", "Jump ball and trails", 0x1E3CE0},
+        {"Shadow", "Red stripes", 0xD01818},  {"Shadow", "Jump ball and trails", 0xE0A020},
+        {"Tails", "Fur", 0xF0B030},           {"Dr. Eggman", "Suit", 0xD01818},
+        {"Knuckles", "Red", 0xD82020},        {"Rouge", "White fur", 0xF0F0F0},
+        {"Tails' Cyclone", "Blue", 0x3040C0}, {"Tails' Cyclone", "Yellow", 0xF0C020},
+        {"Eggman's Egg Walker", "Gray", 0xA0A0A0}, {"Eggman's Egg Walker", "Red", 0xD01818},
+    };
+    struct Preset {
+        const char* name;
+        int rgb;
+    };
+    static const Preset kPresets[] = {{"Red", 0xE02020},   {"Orange", 0xF08020}, {"Yellow", 0xF0D020}, {"Green", 0x20C040},
+                                      {"Cyan", 0x20C8E0},  {"Blue", 0x2050F0},   {"Purple", 0x8030E0}, {"Pink", 0xF060C0},
+                                      {"White", 0xF0F0F0}, {"Black", 0x303030}};
+    auto vec = [](int rgb) { return ImVec4(float(rgb >> 16 & 255) / 255, float(rgb >> 8 & 255) / 255, float(rgb & 255) / 255, 1); };
+    ImGui::Text("Colours");
+    if (active()) ImGui::TextDisabled("Your partner sees your colours too.");
+    int* colours = settings().colours;
+    bool changed = false, done = false;
+    for (int i = 0; i < kColourSlots; i++) {
+        if (!i || std::strcmp(kSlots[i].group, kSlots[i - 1].group)) ImGui::SeparatorText(kSlots[i].group);
+        ImGui::PushID(i);
+        bool own = colours[i] >= 0;
+        if (ImGui::Checkbox(kSlots[i].what, &own)) colours[i] = own ? kSlots[i].game : -1, changed = done = true;
+        if (own) {
+            ImGui::Indent();
+            float c[3] = {float(colours[i] >> 16 & 255) / 255, float(colours[i] >> 8 & 255) / 255, float(colours[i] & 255) / 255};
+            if (ImGui::ColorEdit3("##pick", c, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_PickerHueWheel)) {
+                colours[i] = int(c[0] * 255 + 0.5f) << 16 | int(c[1] * 255 + 0.5f) << 8 | int(c[2] * 255 + 0.5f);
+                changed = true;
+            }
+            done |= ImGui::IsItemDeactivatedAfterEdit();
+            const float sz = ImGui::GetFrameHeight();
+            for (int k = 0; k < int(std::size(kPresets)); k++) {  // (ids by number: "Blue" is a slot's name too)
+                const Preset& p = kPresets[k];
+                ImGui::SameLine();
+                ImGui::PushID(100 + k);
+                if (ImGui::ColorButton("##preset", vec(p.rgb), ImGuiColorEditFlags_NoTooltip, ImVec2(sz, sz))) colours[i] = p.rgb, changed = done = true;
+                ImGui::PopID();
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p.name);
+            }
+            ImGui::Unindent();
+        }
+        ImGui::PopID();
+    }
+    if (changed) coloursChanged();
+    if (done) saveSettings();
+}
+
 void playerMenu() {
     static char s_name[32] = "";
     static bool s_init = false;
@@ -87,7 +253,7 @@ void playerMenu() {
     if (ImGui::InputText("##name", s_name, 25) && s_name[0]) settings().name = s_name;
     if (ImGui::IsItemDeactivatedAfterEdit()) saveSettings();
     ImGui::Separator();
-    ImGui::TextDisabled("Character colors: with the co-op partner update");
+    colourMenu();
 }
 
 void discordMenu() {
@@ -114,15 +280,31 @@ void overlay() {
     // readable at any window size (ImGui's font is drawn for about 720 lines)
     io.FontGlobalScale = std::max(1.f, io.DisplaySize.y / 760.f);
     watchLink();
-    if (nowS() < s_notice.until) {
+    Notice notice;
+    {
+        std::lock_guard g(s_noticeLock);
+        notice = s_notice;
+    }
+    if (nowS() < notice.until) {
         ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 16, s_open ? 48.f : 16.f), ImGuiCond_Always, ImVec2(1, 0));
         ImGui::SetNextWindowBgAlpha(0.7f);
         ImGui::Begin("##notice", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
                          ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
-        ImGui::TextUnformatted(s_notice.text.c_str());
+        ImGui::TextUnformatted(notice.text.c_str());
         ImGui::End();
     }
+    // What the game is holding for (the partner still on the way to the goal), centred low.
+    if (const std::string held = gameStatus(); !held.empty()) {
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.78f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowBgAlpha(0.7f);
+        ImGui::Begin("##held", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+        ImGui::TextUnformatted(held.c_str());
+        ImGui::End();
+    }
+    if (active()) nameTagOverlay(io), chatOverlay(io, s_open);
     if (!s_open) return;
     if (ImGui::BeginMainMenuBar()) {
         if (ImGui::BeginMenu("Co-op")) coopMenu(), ImGui::EndMenu();

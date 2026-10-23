@@ -39,6 +39,8 @@
 
 namespace rt {
 
+const u8* (*g_texSubstitute)(u32 addr, u32 format, u32 width, u32 height) = nullptr;
+
 extern std::atomic<u64> g_relLinkFrame[256];  // src/runtime/dispatch.cpp
 u32 mmioGet16(u32 off);
 u32 mmioGet32(u32 off);
@@ -360,9 +362,10 @@ void loadTexture(int map, u32 image3) {
     const u32 maxLod = (s_texMode1[map] >> 8) & 0xFF;
     const u32 slot = tlutSlot(s_tlutRegion[map] & 0x3FF);
     if (fmt == 0x8 || fmt == 0x9 || fmt == 0xA) emitTlut(slot, (s_tlutRegion[map] >> 10) & 3);  // CI: palette + its format
+    const u8* substitute = g_texSubstitute ? g_texSubstitute(0x80000000u | ((image3 & 0x00FFFFFF) << 5), fmt, w, h) : nullptr;
     aurora(AUR_LOAD_TEXOBJ);
     put8(u32(map));
-    put64(hostAddr((image3 & 0x00FFFFFF) << 5));
+    put64(substitute ? u64(reinterpret_cast<uintptr_t>(substitute)) : hostAddr((image3 & 0x00FFFFFF) << 5));
     put32(w);
     put32(h);
     put32(fmt);
@@ -1222,6 +1225,16 @@ u64 gxFrames() { return s_frames; }
 double gxNow() {
     static const auto s_t0 = std::chrono::steady_clock::now();
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - s_t0).count();
+}
+
+
+bool gxProject(const float eye[3], float& x, float& y) {
+    if (s_xf[0x1026] != 0 || eye[2] > -1e-3f) return false;  // (orthographic, or behind the eye)
+    const float ndcX = (xff(0x1020) * eye[0] + xff(0x1021) * eye[2]) / -eye[2];
+    const float ndcY = (xff(0x1022) * eye[1] + xff(0x1023) * eye[2]) / -eye[2];
+    x = ndcX * xff(0x101A) + xff(0x101D) - 342.f;
+    y = ndcY * xff(0x101B) + xff(0x101E) - 342.f;
+    return true;
 }
 
 }  // namespace rt

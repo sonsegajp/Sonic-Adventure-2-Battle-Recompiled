@@ -195,11 +195,13 @@ HLE(PADControlMotor) {}
 void padSnapshot(u8 out[4][12]);  // src/runtime/frontend.cpp (host controllers via Aurora)
 namespace coop {
 void padFilter(u8 pads[4][12]);  // src/runtime/coopgame.cpp: in co-op, player 1 drives menus and cutscenes
+bool typing();                    // src/runtime/coopmenu.cpp: the chat line is open
 }
 HLE(PADRead) {
     u8 pads[4][12];
     padSnapshot(pads);
     tasEntry(pads[0]);
+    if (coop::typing()) std::memset(pads[0], 0, 10);  // (typing a chat line: no buttons for the game)
     coop::padFilter(pads);
     s_padReads++;
     u32 mask = 0;

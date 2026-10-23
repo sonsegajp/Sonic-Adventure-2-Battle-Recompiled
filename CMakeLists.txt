@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(sa2brecomp LANGUAGES C CXX VERSION 1.0.0)
+project(sa2brecomp LANGUAGES C CXX VERSION 1.1.0)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -51,7 +51,7 @@ set(AURORA_ENABLE_DVD OFF CACHE BOOL "" FORCE)
 set(AURORA_ENABLE_CARD OFF CACHE BOOL "" FORCE)
 add_subdirectory(extern/aurora EXCLUDE_FROM_ALL)
 
-# ---- Launcher: disc, settings, HD textures, mods; drawn with the game's menu art from the disc ----
+# ---- Launcher: disc, settings, co-op, mods; drawn with the game's menu art from the disc ----
 # The programs' icon, on Windows: Sonic's lives icon from the disc when tools/launcher/mkicon.py
 # --disc has made it (build/icon, never committed), else our own (res/sa2b.ico).
 set(SA2_ICON_RC "")

@@ -15,7 +15,12 @@ struct Settings {
     bool discord = true;                      // Discord Rich Presence
     std::string discordAppId;                 // the Discord application it shows as (empty: off)
     std::string lastCode;                     // the last code joined (the menu offers it again)
+    // Colours (coopcolour.cpp), by slot: Sonic's blue, his jump ball and trails, Shadow's red stripes,
+    // his jump ball and trails, Tails' fur, Eggman's suit, Knuckles' red, Rouge's white fur, the
+    // Cyclone's blue and yellow, the Egg Walker's gray and red: 0xRRGGBB, or -1 as the game has it.
+    int colours[12] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};
 };
+constexpr int kColourSlots = 12;
 Settings& settings();
 void saveSettings();
 
@@ -32,9 +37,29 @@ void hostOrJoin(bool host, const std::string& code);
 constexpr int kRestartedInCoop = 0x5A2B;
 
 void gameInit();  // the stage side (coopgame.cpp): player 2 = the partner
+void soloInit();  // ... not in co-op: only your colours, on your own character
+void coloursChanged();  // coopgame.cpp: settings().colours changed (any thread): yours redone and sent
+void recolourPlayer(int n, const int* colours);  // coopcolour.cpp (game thread): player n's character in these colours
+void planDrawn(int n, const int* colours);  // ... painted as drawn instead (colours nullptr: grey), around drawPainted(n)
+void drawPainted(int n);                    // player n is being drawn (-1: none)
+std::string gameStatus();  // coopgame.cpp: a line shown while the game holds for the partner (else empty)
 void overlay();  // render thread, each frame between aurora_begin_frame and aurora_end_frame: F1 menu, notices
+void notify(const std::string& text);  // a notice in the corner for a few seconds (any thread)
+
+// Chat (T opens it: coopmenu.cpp; messages over the link: coopgame.cpp).
+void sendChat(const std::string& text);  // coopgame.cpp (any thread): to the partner, and into the chat
+void chatArrived(const std::string& name, unsigned colour, const std::string& text);  // coopmenu.cpp (any thread)
+bool typing();                           // coopmenu.cpp: the chat is open (the game gets no buttons)
+unsigned myNameColour();                 // coopgame.cpp: 0xRRGGBB of your character now (your colour for it)
+// The partner's name tag (coopgame.cpp): where above their head on the game's 640x480 screen, its
+// colour - false when they are not on screen.
+bool nameTag(float& x, float& y, unsigned& colour);
 
 }  // namespace rt::coop
+
+namespace rt {
+void audioBeep();  // src/runtime/audio.cpp: a short chime over the game's sound (chat)
+}
 
 namespace rt::discord {
 void start();               // Rich Presence on its own thread (if enabled and an application id is set)

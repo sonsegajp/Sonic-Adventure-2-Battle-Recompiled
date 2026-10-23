@@ -1,12 +1,12 @@
 # Assembles a release from the build: dist\SA2BRecompiled\ (the runtime, the launcher, their
-# libraries, the bundled compiler, the HD texture builder's scripts, readme and licences) and
+# libraries, the bundled compiler, readme and licences) and
 # dist\SA2BRecompiled-<version>-windows-x64.zip.
 # Nothing of the game goes in - neither its data nor its code, translated or not: the launcher builds
 # sa2b_game.dll from the player's own disc at first run (docs/SETUP.md), and the game reads the disc.
-#   tools\package.ps1 -Version 1.0.0
+#   tools\package.ps1 -Version 1.1.0
 # Needs build\llvm\clang.exe, lld-link.exe and LICENSE.TXT: from the official LLVM 19.1.5 release
 # (LLVM-19.1.5-win64.exe, unpacked with 7-Zip: bin\clang.exe, bin\lld-link.exe; llvm/LICENSE.TXT).
-param([string]$Version = "1.0.0")
+param([string]$Version = "1.1.0")
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $bin = Join-Path $root 'build\windows-clang'
@@ -17,7 +17,6 @@ foreach ($f in 'clang.exe', 'lld-link.exe', 'LICENSE.TXT') {
     if (-not (Test-Path (Join-Path $llvm $f))) { throw "build\llvm\$f is missing (see the top of this script)" }
 }
 if (Test-Path $out) { Remove-Item -Recurse -Force $out }
-New-Item -ItemType Directory -Force (Join-Path $out 'tools\hd') | Out-Null
 New-Item -ItemType Directory -Force (Join-Path $out 'tools\llvm') | Out-Null
 
 # the runtime and its import library (the game module links against it), the launcher
@@ -26,7 +25,6 @@ foreach ($f in 'sa2b.exe', 'sa2b.lib', 'SA2BLauncher.exe') { Copy-Item (Join-Pat
 Get-ChildItem $bin -Filter *.dll | Where-Object { $_.Name -ne 'sa2b_game.dll' } | ForEach-Object { Copy-Item $_.FullName $out }
 foreach ($f in 'clang.exe', 'lld-link.exe', 'LICENSE.TXT') { Copy-Item (Join-Path $llvm $f) (Join-Path $out 'tools\llvm') }
 Copy-Item (Join-Path $root 'tools\prs.py') (Join-Path $out 'tools')
-foreach ($f in 'build_pack.py', 'upscale.py', 'gvr.py', 'setup.ps1') { Copy-Item (Join-Path $root "tools\hd\$f") (Join-Path $out 'tools\hd') }
 Copy-Item (Join-Path $root 'LICENSE.md') $out
 Copy-Item (Join-Path $root 'res\THIRD_PARTY_NOTICES.txt') $out
 Copy-Item (Join-Path $root 'res\README.txt') $out

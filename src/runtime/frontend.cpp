@@ -149,6 +149,11 @@ void pollPads() {
     st[0].button |= scripted & ~(kStickLeft | kStickRight);
     if (scripted & kStickLeft) st[0].stickX = -100;
     if (scripted & kStickRight) st[0].stickX = 100;
+    // (scripted directions move the stick too: some menus read only the stick)
+    if (scripted & PAD_BUTTON_UP) st[0].stickY = 100;
+    if (scripted & PAD_BUTTON_DOWN) st[0].stickY = -100;
+    if (scripted & PAD_BUTTON_LEFT) st[0].stickX = -100;
+    if (scripted & PAD_BUTTON_RIGHT) st[0].stickX = 100;
     // SA2_RUN (test runs): from 400 frames after the SA2_DUMP_REL module (a stage) linked, the stick
     // is held forward, so the player travels through the stage.
     static const bool s_run = std::getenv("SA2_RUN") != nullptr;
@@ -398,21 +403,6 @@ int runFrontend(int argc, char** argv, bool headless, u64 maxFrames, void (*star
     const AuroraInfo info = aurora_initialize(argc, argv, &cfg);
     AuroraSetViewportPolicy(widescreen ? AURORA_VIEWPORT_STRETCH : AURORA_VIEWPORT_FIT);
     AuroraSetWidescreen(widescreen);
-    // --hd-textures <folder>: the launcher's HD texture pack (tools/hd/build_pack.py). Aurora looks a
-    // replacement up as each texture loads, by size, format and the hash of its texels (Dolphin's
-    // tex1_ names), and streams it in.
-    // The ones loaded stay cached up to a budget (least recently used dropped first): about a third
-    // of the graphics card's memory (Aurora's own 4 GB would fill a 6 GB card with the game's
-    // buffers besides), 0.5-4 GB.
-    for (int i = 1; i + 1 < argc; i++)
-        if (!std::strcmp(argv[i], "--hd-textures")) {
-            const u64 vram = hostGpuMemory();
-            const u64 budget = std::clamp<u64>(vram ? vram * 3 / 10 : 1ull << 30, 512ull << 20, 4ull << 30);
-            aurora::texture::set_replacement_cache_budget(budget);
-            const auto group = aurora::texture::load_replacement_directory(std::filesystem::path(argv[i + 1]));
-            log("[frontend] HD textures: %zu from %s; up to %llu MB kept (card: %llu MB)\n", group.registrations.size(), argv[i + 1],
-                (unsigned long long)(budget >> 20), (unsigned long long)(vram >> 20));
-        }
     log("[frontend] Aurora up: backend %d, window %ux%u, framebuffer %ux%u\n", int(info.backend), info.windowSize.width,
         info.windowSize.height, info.windowSize.fb_width, info.windowSize.fb_height);
     // Aurora's own GX/VI state starts from its GXInit defaults and a 640x480 NTSC logical

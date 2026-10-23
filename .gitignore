@@ -10,16 +10,9 @@ __pycache__/
 *.pyc
 saves/
 mods/
-# Local state: settings, logs, HD textures, the upscaler (Python, PyTorch, models: fetched by
-# tools/hd/setup.ps1 - the HDcube licence does not allow redistributing the model)
+# Local state: settings, logs
 launcher.ini
 *.log
-textures/
-tools/hd/venv/
-tools/hd/python/
-tools/hd/models/
-tools/hd/download/
-tools/hd/setup_status.txt
 dist/
 # The game module and what the setup leaves: built from the player's disc, never committed
 sa2b_game.dll

@@ -2,6 +2,7 @@
 #include "runtime/runtime.h"
 
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -21,6 +22,9 @@ bool s_active = false;
 coopnet::Link s_link;
 std::vector<std::string> s_args;  // the command line, for starting again in co-op
 constexpr const char* kSettingsFile = "coop.ini";
+const char* const kColourKeys[kColourSlots] = {"sonic",    "sonic_effects", "shadow",        "shadow_effects",
+                                                "tails",    "eggman",        "knuckles",      "rouge",
+                                                "cyclone_blue", "cyclone_yellow", "walker_gray", "walker_red"};
 
 std::string defaultName() {
     const char* u = std::getenv("USERNAME");
@@ -40,6 +44,10 @@ void loadSettings() {
         else if (k == "discord") s_settings.discord = v != "0";
         else if (k == "discord_app_id") s_settings.discordAppId = v;
         else if (k == "last_code") s_settings.lastCode = v;
+        else
+            for (int i = 0; i < kColourSlots; i++)  // colour_<slot>=RRGGBB (else as the game has it)
+                if (k == std::string("colour_") + kColourKeys[i])
+                    s_settings.colours[i] = v.size() == 6 ? int(std::strtol(v.c_str(), nullptr, 16)) : -1;
     }
 }
 }  // namespace
@@ -51,6 +59,11 @@ void saveSettings() {
     std::ofstream f(kSettingsFile);
     f << "name=" << s_settings.name << "\nrelay=" << s_settings.relay << "\ndiscord=" << (s_settings.discord ? 1 : 0)
       << "\ndiscord_app_id=" << s_settings.discordAppId << "\nlast_code=" << s_settings.lastCode << "\n";
+    for (int i = 0; i < kColourSlots; i++) {
+        char v[8] = "game";
+        if (s_settings.colours[i] >= 0) std::snprintf(v, sizeof v, "%06X", s_settings.colours[i] & 0xFFFFFF);
+        f << "colour_" << kColourKeys[i] << "=" << v << "\n";
+    }
 }
 
 coopnet::Relay relay() {

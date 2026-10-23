@@ -775,12 +775,6 @@ SQLite - https://sqlite.org
 The SQLite source code is in the public domain.
 
 ==============================================================================
-HDcube upscaling model (not included) - https://github.com/Venomalia/HDcube
-==============================================================================
-The HD texture builder downloads HDcube 4 Compact from its author's release page on the
-player's computer (tools\hd\setup.ps1). It is not redistributed with this program.
-
-==============================================================================
 Vipnagorgialla (Typodermic Fonts) - https://typodermicfonts.com/vipnagorgialla/
 ==============================================================================
 The launcher's button words are images rendered with this typeface under the Typodermic desktop

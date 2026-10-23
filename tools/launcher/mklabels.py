@@ -8,7 +8,7 @@
 #
 # Each image is an 8-bit coverage mask, run-length coded as (run length - 1, value) byte pairs;
 # the launcher adds the colours, outline and shadow when it builds the textures.
-#   tools/hd/venv/Scripts/python tools/launcher/mklabels.py <folder with the Vipnagorgialla .otf files>
+#   python tools/launcher/mklabels.py <folder with the Vipnagorgialla .otf files>
 import os
 import sys
 
@@ -21,7 +21,6 @@ FONT_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'build', 'la
 LABELS = [
     ('play', 'PLAY', 'Bd', 92),
     ('settings', 'SETTINGS', 'Bd', 92),
-    ('hdtex', 'HD TEXTURES', 'Bd', 92),
     ('mods', 'MODS', 'Bd', 92),
     ('quit', 'QUIT', 'Bd', 92),
     ('choosedisc', 'CHOOSE DISC', 'Bd', 92),
